@@ -789,7 +789,7 @@ func _preview_diff(path: String, new_content: String):
 	var diff_ops = []
 	
 	# Max ~3162x3162 grid, prevents long freezing on massive files
-	if m * n < 10000000: 
+	if m * n < 10000000:
 		var L = []
 		for i in range(m + 1):
 			var row = []
@@ -799,31 +799,31 @@ func _preview_diff(path: String, new_content: String):
 			
 		for i in range(1, m + 1):
 			for j in range(1, n + 1):
-				if old_lines[i-1] == new_lines[j-1]:
-					L[i][j] = L[i-1][j-1] + 1
+				if old_lines[i - 1] == new_lines[j - 1]:
+					L[i][j] = L[i - 1][j - 1] + 1
 				else:
-					L[i][j] = maxi(L[i-1][j], L[i][j-1])
+					L[i][j] = maxi(L[i - 1][j], L[i][j - 1])
 					
 		var i = m
 		var j = n
 		
 		while i > 0 and j > 0:
-			if old_lines[i-1] == new_lines[j-1]:
-				diff_ops.push_front({"type": "=", "text": old_lines[i-1]})
+			if old_lines[i - 1] == new_lines[j - 1]:
+				diff_ops.push_front({"type": "=", "text": old_lines[i - 1]})
 				i -= 1
 				j -= 1
-			elif L[i-1][j] > L[i][j-1]:
-				diff_ops.push_front({"type": "-", "text": old_lines[i-1]})
+			elif L[i - 1][j] > L[i][j - 1]:
+				diff_ops.push_front({"type": "-", "text": old_lines[i - 1]})
 				i -= 1
 			else:
-				diff_ops.push_front({"type": "+", "text": new_lines[j-1]})
+				diff_ops.push_front({"type": "+", "text": new_lines[j - 1]})
 				j -= 1
 				
 		while i > 0:
-			diff_ops.push_front({"type": "-", "text": old_lines[i-1]})
+			diff_ops.push_front({"type": "-", "text": old_lines[i - 1]})
 			i -= 1
 		while j > 0:
-			diff_ops.push_front({"type": "+", "text": new_lines[j-1]})
+			diff_ops.push_front({"type": "+", "text": new_lines[j - 1]})
 			j -= 1
 			
 	else:
@@ -857,36 +857,52 @@ func _preview_diff(path: String, new_content: String):
 
 func _on_accept_changes():
 	"""User approved — apply all pending saves and deletes."""
-	# Remove approval UI
+	_set_status("⏳ Saving...", C_SYS)
+	
+	# Remove approval UI instantly
 	if _approval_panel and is_instance_valid(_approval_panel):
 		_approval_panel.queue_free()
 		_approval_panel = null
 
+	var fs = EditorInterface.get_resource_filesystem() if Engine.is_editor_hint() else null
+	
 	# Apply saves
 	for save_data in _pending_saves:
-		var ok = _write_project_file(save_data["path"], save_data["content"])
+		var path = save_data["path"]
+		var ok = _write_project_file(path, save_data["content"])
 		if ok:
-			_add_file_card(save_data["path"], "SAVED", C_SAVE)
+			_add_file_card(path, "SAVED", C_SAVE)
+			if fs:
+				fs.update_file(path)
+				# Force reload if it's an open script
+				if path.ends_with(".gd"):
+					var res = load(path)
+					if res is Script:
+						res.reload()
 		else:
-			_add_file_card(save_data["path"], "SAVE FAILED", C_ERR)
+			_add_file_card(path, "SAVE FAILED", C_ERR)
 
 	# Apply deletes
 	for del_path in _pending_deletes:
 		var ok = _delete_project_file(del_path)
 		if ok:
 			_add_file_card(del_path, "DELETED", C_DELETE)
+			if fs: fs.update_file(del_path)
 		else:
 			_add_file_card(del_path, "DELETE FAILED", C_ERR)
 
 	_add_msg("system", "✅ All changes applied!")
 
-	# Force Godot to recognize the new files and reload them
-	if Engine.is_editor_hint():
-		var fs = EditorInterface.get_resource_filesystem()
-		fs.scan()
-		# Tunggu sebentar agar scan selesai, lalu paksa inspector refresh
-		await get_tree().create_timer(0.5).timeout
-		EditorInterface.get_inspector().edit(EditorInterface.get_inspector().get_edited_object())
+	# Force Godot to recognize the new files
+	if fs:
+		fs.re_scan_resources()
+		# Wait just one frame for the OS to flush if needed
+		await get_tree().process_frame
+		
+		# Refresh inspector if needed
+		var edited = EditorInterface.get_inspector().get_edited_object()
+		if edited:
+			EditorInterface.get_inspector().edit(edited)
 
 	_pending_saves.clear()
 	_pending_deletes.clear()
