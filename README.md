@@ -1,7 +1,7 @@
 # 🤖 Godot AI Agent
 
 AI sidebar plugin for **Godot 4** — like VS Code Copilot, but for game development.  
-Powered by **qwen/qwen3-coder-480b-a35b-instruct** via **NVIDIA API**.
+Powered by **moonshotai/kimi-k2-instruct** via **NVIDIA API**.
 
 > **No Python backend needed!** Everything runs directly inside Godot.
 
