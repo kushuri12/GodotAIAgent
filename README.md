@@ -10,20 +10,20 @@ Powered by **moonshotai/kimi-k2-instruct** via **NVIDIA API** for state-of-the-a
 
 ## ✨ Features that WOW
 
-| Feature                         | Description                                                                               |
-| :------------------------------ | :---------------------------------------------------------------------------------------- |
-| 🎙️ **Conversational Assistant** | Discuss game design, performance, and logic like you're talking to a senior developer.    |
-| 🛡️ **Unified Diff Preview**     | Review every single line of code the AI wants to change in a beautiful side-by-side view. |
-| ⚡ **Lightning Fast Save**      | Optimized project scanning (`fs.scan()`) for near-instant file operations.                |
-| 📝 **Full Project Access**      | AI can read, create, edit, and delete `.gd`, `.tscn`, and `.tres` files.                  |
-| 🔧 **Smart Error Fixer**        | Reads your Godot logs and fixes script errors automatically.                              |
-| 💡 **Instant Explanation**      | Don't understand a complex shader or physics script? Just ask for a breakdown.            |
-| 🧩 **Node Architect**           | AI helps design node structures and generates the scene files (`.tscn`) for you.          |
-| 📂 **Smart Code Search**        | AI can search for functions and variables across your entire project.                     |
+| Feature                         | Description                                                                                                  |
+| :------------------------------ | :----------------------------------------------------------------------------------------------------------- |
+| 🔄 **Self-Healing Loop**        | **PREMIUM:** AI automatically runs your game after edits, monitors for crashes, and fixes bugs autonomously! |
+| 🎙️ **Conversational Assistant** | Discuss game design, performance, and logic like you're talking to a senior developer.                       |
+| 🛡️ **Unified Diff Preview**     | Review every single line of code the AI wants to change in a beautiful side-by-side view.                    |
+| ⚡ **Lightning Fast Save**      | Optimized project scanning (`fs.scan()`) for near-instant file operations.                                   |
+| ▶️ **Integrated Debugging**     | Run Main Scene, Current Scene, or Stop execution directly from the AI sidebar.                               |
+| 📝 **Full Project Access**      | AI can read, create, edit, and delete `.gd`, `.tscn`, and `.tres` files.                                     |
+| 🔧 **Smart Error Fixer**        | Reads your Godot logs and fixes script errors automatically.                                                 |
+| 🧩 **Node Architect**           | AI helps design node structures and generates the scene files (`.tscn`) for you.                             |
 
 ---
 
-## �️ Modern Architecture (Native 6-File Design)
+## 🛠️ Modern Architecture (Native 6-File Design)
 
 The entire agent is contained within just 6 specialized GDScript files, making it lightweight and easy to maintain:
 
@@ -31,7 +31,7 @@ The entire agent is contained within just 6 specialized GDScript files, making i
 addons/godot_ai_agent/
 ├── plugin.cfg               ← Manifest & Metadata
 ├── plugin.gd                ← Entry point & Editor integration
-├── dock.gd                  ← The "Brain" (UI, Logic, Diff Viewer)
+├── dock.gd                  ← The "Brain" (UI, Logic, Diff Viewer, Self-Healing)
 ├── kimi_client.gd           ← NVIDIA API Connector (High Performance)
 ├── project_scanner.gd       ← File tree & Context builder
 └── ghost_autocomplete.gd    ← AI-powered "Ghost" code completion
@@ -50,7 +50,7 @@ addons/godot_ai_agent/
 
 ## 💬 Try These Commands
 
-- _"How should I structure a top-down RPG inventory system?"_
+- _"Buat sistem musuh yang mengejar pemain dan gunakan Self-Healing untuk tes sampai berhasil."_
 - _"Create a character controller with dash and double jump, then SAVE it to player.gd"_
 - _"Look at my error log and fix why the portal isn't working."_
 - _"Explain how this shader calculates the water waves."_
@@ -58,19 +58,22 @@ addons/godot_ai_agent/
 
 ---
 
-## 🔧 Workflow Overview
+## 🔧 Workflow: Self-Healing Loop
 
 ```mermaid
 graph TD
     A[User Prompt] --> B[AI Agent Dock]
-    B --> C{Decision}
-    C -->|Need Context| D[Scan Project / Read Files]
-    C -->|Need Discussion| E[Conversational Response]
-    C -->|Need Edit| F[Generate Code]
-    D --> B
-    F --> G[Unified Diff Preview]
-    G -->|Accept| H[Direct File Write via DirAccess]
-    G -->|Reject| B
+    B --> C[Generate Code]
+    C --> D[User Clicks Accept]
+    D --> E[File Saved to Project]
+    E --> F{Self-Healing ON?}
+    F -->|Yes| G[Auto-Run Game]
+    G --> H[User Tests / Close Game]
+    H --> I[Auto-Scan Logs for Errors]
+    I -->|Errors Found| J[AI Auto-Fixes Code]
+    J --> C
+    I -->|No Errors| K[Task Completed! ✅]
+    F -->|No| K
 ```
 
 ---

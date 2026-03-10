@@ -41,6 +41,8 @@ var _pending_deletes: Array[String] = []
 var _approval_panel: PanelContainer = null
 var _tree_sent := false # Only send project tree once per session
 var _read_files: Array[String] = [] # Track which files AI has READ this session
+var _self_healing_enabled := false
+var _is_game_running_monitored := false
 
 
 func _ready():
@@ -171,6 +173,26 @@ func _build_action_buttons():
 	_add_action_btn(row2, "📂 Scan", "Scan project", _on_scan)
 	_add_action_btn(row2, "🗑️ Clear", "Clear chat", _on_clear)
 	add_child(row2)
+
+	var row3 = HBoxContainer.new()
+	row3.add_theme_constant_override("separation", 3)
+	_add_action_btn(row3, "▶️ Play", "Run main scene", _on_play_main)
+	_add_action_btn(row3, "🎬 Scene", "Run current scene", _on_play_current)
+	_add_action_btn(row3, "⏹️ Stop", "Stop game", _on_stop_game)
+	add_child(row3)
+	
+	var row4 = HBoxContainer.new()
+	row4.add_theme_constant_override("separation", 3)
+	var heal_btn = Button.new()
+	heal_btn.name = "HealBtn"
+	heal_btn.text = "🔁 Self-Healing: OFF"
+	heal_btn.tooltip_text = "Auto-run game after SAVE and auto-fix errors"
+	heal_btn.size_flags_horizontal = SIZE_EXPAND_FILL
+	heal_btn.toggle_mode = true
+	heal_btn.toggled.connect(_on_self_healing_toggled)
+	_style_btn(heal_btn, Color("#2d1b69"))
+	row4.add_child(heal_btn)
+	add_child(row4)
 
 
 func _add_action_btn(parent: HBoxContainer, text: String, tip: String, callback: Callable):
@@ -494,6 +516,7 @@ func _on_ai_response(text: String):
 	var read_lines = _extract_read_lines(text)
 	var saves = _extract_saves(text)
 	var deletes = _extract_deletes(text)
+	var run_req = _extract_run_game(text)
 
 	# 2) Show CLEAN AI message (no raw code blocks)
 	chat_history.append({"role": "assistant", "content": text})
@@ -608,6 +631,11 @@ func _on_ai_response(text: String):
 		_show_approval_ui()
 		_set_status("⏸ Waiting for approval...", C_SYS)
 		return
+
+	# Handle RUN_GAME requests
+	if run_req != "":
+		_add_msg("system", "🚀 AI requested to run the game (%s). Use the Play buttons below to test." % run_req)
+		# We don't auto-run for safety, but we let the user know
 
 	# LIMIT FALLBACK: Prevent silent hanging
 	var wants_to_action = reads.size() > 0 or read_lines.size() > 0 or searches.size() > 0 or saves.size() > 0 or deletes.size() > 0
@@ -910,6 +938,10 @@ func _on_accept_changes():
 	_pending_saves.clear()
 	_pending_deletes.clear()
 	_set_status("● Ready", Color("#00ff88"))
+	
+	if _self_healing_enabled:
+		await get_tree().create_timer(0.5).timeout
+		_on_play_main()
 
 func _on_cancel_pressed():
 	kimi.cancel_request()
@@ -1323,6 +1355,69 @@ func _show_settings():
 	dialog.popup_centered()
 
 
+func _on_play_main():
+	if Engine.is_editor_hint():
+		EditorInterface.play_main_scene()
+		_add_msg("system", "▶️ Running main project scene...")
+		_set_status("▶️ Playing", Color("#00ff88"))
+		_is_game_running_monitored = true
+
+func _on_play_current():
+	if Engine.is_editor_hint():
+		EditorInterface.play_current_scene()
+		_add_msg("system", "🎬 Running current editor scene...")
+		_set_status("🎬 Playing", Color("#42a5f5"))
+		_is_game_running_monitored = true
+
+func _on_stop_game():
+	if Engine.is_editor_hint():
+		EditorInterface.stop_playing_scene()
+		_add_msg("system", "⏹️ Game execution stopped.")
+		_set_status("● Ready", Color("#00ff88"))
+		_is_game_running_monitored = false
+
+func _on_self_healing_toggled(on: bool):
+	_self_healing_enabled = on
+	var btn = find_child("HealBtn", true, false)
+	if btn:
+		btn.text = "🔁 Self-Healing: ON" if on else "🔁 Self-Healing: OFF"
+		_style_btn(btn, Color("#00e676") if on else Color("#2d1b69"))
+	
+	if on:
+		_add_msg("system", "🔁 **Self-Healing Loop Active!**\nAI will now automatically run the game after you Accept changes and fix any errors it finds.")
+	else:
+		_add_msg("system", "⏸ **Self-Healing Loop Disabled.**")
+
+func _process(_delta):
+	if _self_healing_enabled and _is_game_running_monitored:
+		if not EditorInterface.is_playing_scene():
+			_is_game_running_monitored = false
+			_add_msg("system", "🏁 Game stopped. Scanning for errors...")
+			_auto_check_errors()
+
+func _auto_check_errors():
+	# Simple debounce/wait for logs to flush
+	await get_tree().create_timer(0.5).timeout
+	var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
+	var log_text = Scanner.read_godot_log()
+	
+	if "error" in log_text.to_lower() or "warning" in log_text.to_lower():
+		_add_msg("system", "⚠️ Errors detected in log! Sending to AI for autonomous fix...")
+		_send("AUTODEBUG: I just ran the game and found these errors in the log. Please analyze and fix them automatically:\n\n" + log_text)
+	else:
+		_add_msg("system", "✅ No critical errors found in logs after test run.")
+
+
+func _extract_run_game(text: String) -> String:
+	"""Extract [RUN_GAME:type] tags."""
+	var rx = RegEx.new()
+	rx.compile("\\[RUN_GAME:(main|current)\\]")
+	var m = rx.search(text)
+	if m:
+		return m.get_string(1)
+	return ""
+
+
 # ══════════════════ SYSTEM PROMPT ══════════════════
 
 func _system_prompt() -> String:
@@ -1343,6 +1438,8 @@ To SAVE/OVERWRITE a file, you MUST use this EXACT format WITH the markdown backt
 ```
 
 [DELETE:res://path/file.gd] — Delete a file
+[RUN_GAME:main] — Suggest running the main project scene
+[RUN_GAME:current] — Suggest running the current editor scene
 
 ═══ BEHAVIOR & RULES ═══
 
