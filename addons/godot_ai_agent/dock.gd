@@ -47,6 +47,14 @@ var _read_files: Array[String] = [] # Track which files AI has READ this session
 var _self_healing_enabled := false
 var _is_game_running_monitored := false
 
+# ──────────────────── Streaming State ────────────────────
+var _streaming_bubble: PanelContainer = null
+var _streaming_content: RichTextLabel = null
+var _streaming_raw_text := ""
+var _activity_log: Array[Dictionary] = [] # {icon, text, color, timestamp}
+var _activity_panel: PanelContainer = null
+var _step_counter := 0
+
 
 func _ready():
 	custom_minimum_size = Vector2(300, 400)
@@ -67,6 +75,13 @@ func _setup_kimi():
 	add_child(kimi)
 	kimi.chat_completed.connect(_on_ai_response)
 	kimi.chat_error.connect(_on_ai_error)
+	# Streaming signals
+	if kimi.has_signal("stream_started"):
+		kimi.stream_started.connect(_on_stream_started)
+	if kimi.has_signal("token_received"):
+		kimi.token_received.connect(_on_token_received)
+	if kimi.has_signal("stream_finished"):
+		kimi.stream_finished.connect(_on_stream_finished)
 
 
 # ══════════════════ UI CONSTRUCTION ══════════════════
@@ -519,7 +534,7 @@ func _hide_thinking():
 
 
 func _add_welcome():
-	_add_msg("ai", "Halo! Nama saya **Hiru**, asisten AI Godot pribadi Anda.\n\nSaya bisa membantumu:\n• 📖 MEMBACA file .gd dan .tscn\n• 💾 MEMBUAT & EDIT script\n• 🗑️ MENGHAPUS file\n• 🔧 MEMPERBAIKI error dari log Godot\n• 🔄 SELF-HEALING (Auto-debug)\n\nSilakan klik ikon ⚙️ di pojok kanan atas untuk mengatur API Key dan model pilihanmu!")
+	_add_msg("ai", "Halo! Saya **Hiru** — AI coding agent pribadimu untuk Godot 4.x.\n\n**Kemampuan saya:**\n• 🧠 **Smart Planning** — Saya berfikir step-by-step sebelum bertindak\n• ⚡ **Real-time Streaming** — Respons langsung muncul kata per kata\n• 📖 READ & SEARCH file otomatis\n• 💾 CREATE & EDIT script (.gd & .tscn)\n• 🔧 AUTO-FIX error + syntax check\n• � SELF-HEALING (auto-debug loop)\n\nSilakan klik ⚙️ di pojok kanan atas untuk set API Key!")
 
 
 # ══════════════════ SEND LOGIC ══════════════════
@@ -547,15 +562,18 @@ func _send(text: String):
 	_add_msg("user", text)
 	input_field.text = ""
 	_read_loop_count = 0
+	_step_counter = 0
+	_activity_log.clear()
 
 	# Only send file tree on first message or after Clear
 	if not _tree_sent:
-		_show_thinking("📂 Scanning project structure...", "scan")
+		_add_activity("📂", "Scanning project structure...", Color("#42a5f5"))
 		await get_tree().create_timer(0.1).timeout
 		var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
 		var context = Scanner.get_file_tree()
 		chat_history.append({"role": "user", "content": text + "\n\n[Project]\n" + context})
 		_tree_sent = true
+		_add_activity("✅", "Project scanned successfully", Color("#00e676"))
 	else:
 		chat_history.append({"role": "user", "content": text})
 
@@ -569,7 +587,8 @@ func _send_to_ai():
 	messages.append_array(recent)
 
 	_set_status("⏳ Thinking...", C_SYS)
-	_update_thinking("Sending to %s..." % kimi.current_model.get_file(), "wait")
+	_step_counter += 1
+	_add_activity("⏳", "Step %d — Sending to %s..." % [_step_counter, kimi.current_model.get_file()], Color("#ffd93d"))
 	
 	# Toggle buttons
 	send_btn.visible = false
@@ -579,10 +598,107 @@ func _send_to_ai():
 	kimi.send_chat(messages)
 
 
+# ══════════════════ STREAMING HANDLERS ══════════════════
+
+func _on_stream_started():
+	"""Called when first SSE token arrives — create live bubble."""
+	_hide_thinking()
+	_streaming_raw_text = ""
+	_step_counter += 1
+	_add_activity("🧠", "AI is generating response...", Color("#ab47bc"))
+	
+	# Create streaming bubble
+	_streaming_bubble = PanelContainer.new()
+	_streaming_bubble.name = "StreamingBubble"
+	_streaming_bubble.size_flags_horizontal = SIZE_EXPAND_FILL
+	var bstyle = _sb(C_AI_BG, 10, true, C_AI_BG.lightened(0.05))
+	bstyle.border_color = C_ACCENT.darkened(0.3)
+	bstyle.border_width_left = 4
+	_streaming_bubble.add_theme_stylebox_override("panel", bstyle)
+
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 2)
+
+	var sender = Label.new()
+	sender.text = "🤖 Hiru"
+	sender.add_theme_color_override("font_color", C_AI)
+	sender.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(sender)
+	
+	# Streaming indicator
+	var stream_hint = Label.new()
+	stream_hint.name = "StreamHint"
+	stream_hint.text = "● streaming..."
+	stream_hint.add_theme_color_override("font_color", Color("#00e676"))
+	stream_hint.add_theme_font_size_override("font_size", 10)
+	vbox.add_child(stream_hint)
+
+	_streaming_content = RichTextLabel.new()
+	_streaming_content.bbcode_enabled = true
+	_streaming_content.fit_content = true
+	_streaming_content.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_streaming_content.scroll_active = false
+	_streaming_content.size_flags_horizontal = SIZE_EXPAND_FILL
+	_streaming_content.add_theme_color_override("default_color", C_TEXT)
+	_streaming_content.add_theme_font_size_override("normal_font_size", 15)
+	_streaming_content.text = ""
+	vbox.add_child(_streaming_content)
+
+	_streaming_bubble.add_child(vbox)
+	chat_container.add_child(_streaming_bubble)
+	_scroll_bottom()
+
+
+func _on_token_received(token: String):
+	"""Called per-token — append to live bubble."""
+	_streaming_raw_text += token
+	if _streaming_content and is_instance_valid(_streaming_content):
+		# Update with formatted text periodically (every ~5 tokens for performance)
+		_streaming_content.text = _fmt(_streaming_raw_text)
+		# Auto-scroll
+		_scroll_bottom()
+
+
+func _on_stream_finished(full_text: String):
+	"""Called when SSE stream ends — clean up streaming bubble."""
+	# Remove the streaming bubble (the _on_ai_response will add the final version)
+	if _streaming_bubble and is_instance_valid(_streaming_bubble):
+		_streaming_bubble.queue_free()
+		_streaming_bubble = null
+	_streaming_content = null
+	_streaming_raw_text = ""
+	_add_activity("✅", "Response complete", Color("#00e676"))
+
+
+func _add_activity(icon: String, text: String, color: Color):
+	"""Add entry to the live activity log in the thinking panel."""
+	var entry = {"icon": icon, "text": text, "color": color, "time": Time.get_ticks_msec()}
+	_activity_log.append(entry)
+	
+	# Update or create activity panel
+	_update_thinking(icon + " " + text, _phase_from_icon(icon))
+
+
+func _phase_from_icon(icon: String) -> String:
+	match icon:
+		"📂", "🔍": return "scan"
+		"📖": return "read"
+		"✏️", "💾": return "edit"
+		"🧠": return "think"
+		"⏳": return "wait"
+		_: return "wait"
+
+
 # ══════════════════ AI RESPONSE HANDLER ══════════════════
 
 func _on_ai_response(text: String):
 	_hide_thinking()
+	
+	# Remove streaming bubble if still present
+	if _streaming_bubble and is_instance_valid(_streaming_bubble):
+		_streaming_bubble.queue_free()
+		_streaming_bubble = null
+	_streaming_content = null
 	
 	# Restore buttons
 	send_btn.visible = true
@@ -605,10 +721,11 @@ func _on_ai_response(text: String):
 	# 3) Handle SEARCH requests
 	if searches.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
 		_read_loop_count += 1
+		_add_activity("🔍", "Searching %d keyword(s)..." % searches.size(), Color("#9c27b0"))
 		var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
 		var search_results := ""
 		for q in searches:
-			_update_thinking("🔍 Searching for '" + q + "'...", "scan")
+			_add_activity("🔍", "Searching for '" + q + "'...", Color("#42a5f5"))
 			var result = Scanner.search_text(q)
 			_add_file_card("Keyword: " + q, "SEARCH", Color("#9c27b0"))
 			search_results += "\n=== Search: %s ===\n%s\n" % [q, result]
@@ -623,13 +740,14 @@ func _on_ai_response(text: String):
 	# 3a) Handle READ requests first — auto-read loop
 	if reads.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
 		_read_loop_count += 1
+		_add_activity("📖", "Reading %d file(s)..." % reads.size(), Color("#42a5f5"))
 		var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
 		var file_contents := ""
 		var read_count := 0
 		for read_path in reads:
-			if read_count >= 3: # Max 3 files per read cycle to save tokens
+			if read_count >= 3:
 				break
-			_update_thinking("📖 Reading " + read_path.get_file() + "...", "read")
+			_add_activity("📖", "Reading " + read_path.get_file() + "...", Color("#64b5f6"))
 			var content = Scanner.read_file(read_path)
 			_add_file_card(read_path, "READ", C_READ)
 			file_contents += "\n--- %s ---\n%s\n" % [read_path, content]
@@ -638,7 +756,7 @@ func _on_ai_response(text: String):
 			read_count += 1
 		if reads.size() > 3:
 			file_contents += "\n(Skipped %d files. Use [READ:] again for remaining.)" % (reads.size() - 3)
-		_update_thinking("🧠 Analyzing " + str(read_count) + " file(s)...", "think")
+		_add_activity("🧠", "Analyzing " + str(read_count) + " file(s)...", Color("#ab47bc"))
 		chat_history.append({
 			"role": "user",
 			"content": "File contents:\n" + file_contents + "\nProceed with the task."
@@ -652,7 +770,7 @@ func _on_ai_response(text: String):
 		var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
 		var file_contents := ""
 		for rl in read_lines:
-			_update_thinking("📖 Reading lines %d-%d of %s..." % [rl["start"], rl["end"], rl["path"].get_file()], "read")
+			_add_activity("📖", "Reading lines %d-%d of %s..." % [rl["start"], rl["end"], rl["path"].get_file()], Color("#64b5f6"))
 			var content = Scanner.read_file_lines(rl["path"], rl["start"], rl["end"])
 			_add_file_card(rl["path"].get_file() + " (%d-%d)" % [rl["start"], rl["end"]], "READ LINES", C_READ.darkened(0.2))
 			file_contents += "\n--- %s (lines %d-%d) ---\n%s\n" % [rl["path"], rl["start"], rl["end"], content]
@@ -679,7 +797,7 @@ func _on_ai_response(text: String):
 			var Scanner = load("res://addons/godot_ai_agent/project_scanner.gd")
 			var file_contents := ""
 			for upath in unread_saves:
-				_update_thinking("⚠️ Must read " + upath.get_file() + " before editing...", "read")
+				_add_activity("⚠️", "Must read " + upath.get_file() + " before editing...", Color("#ffd93d"))
 				var content = Scanner.read_file(upath)
 				_add_file_card(upath, "READ", C_READ)
 				file_contents += "\n--- %s ---\n%s\n" % [upath, content]
@@ -698,7 +816,7 @@ func _on_ai_response(text: String):
 		for s in saves:
 			var spath: String = s["path"]
 			if spath.ends_with(".gd"):
-				var scode: String = s["code"]
+				var scode: String = s["content"]
 				var err_msg = _check_syntax_error(scode)
 				if err_msg != "":
 					syntax_errors.append({"path": spath, "error": err_msg})
@@ -710,7 +828,7 @@ func _on_ai_response(text: String):
 				err_list += "\n- File: %s\n- Error: %s\n" % [se["path"], se["error"]]
 			
 			_add_msg("system", "🔍 **Syntax check failed.** Hiru is auto-fixing the code...")
-			_update_thinking("Fixing syntax errors...", "edit")
+			_add_activity("✏️", "Auto-fixing syntax errors...", Color("#00e676"))
 			
 			chat_history.append({
 				"role": "user",
@@ -1576,52 +1694,109 @@ func _extract_run_game(text: String) -> String:
 # ══════════════════ SYSTEM PROMPT ══════════════════
 
 func _system_prompt() -> String:
-	return """You are personalized AI Assistant for Godot 4.x (GDScript) named Hiru.
-You have direct control over the user's project files.
-Be conversational, friendly, and act as a professional assistant (asisten).
-Always refer to yourself as Hiru if asked for your name.
-You can discuss ideas, explain logic, and help with project structure.
+	return """You are **Hiru**, an elite AI coding agent for Godot 4.x (GDScript).
+You have DIRECT file-system access to the user's Godot project.
+You are NOT a chatbot — you are a professional coding agent like Cursor, Copilot, or Windsurf.
+
+═══ YOUR IDENTITY ═══
+- Name: Hiru
+- Role: Expert Godot 4.x developer & project assistant
+- Personality: Friendly, precise, proactive. Never lazy, never vague.
+- Language: Match the user's language (if they speak Indonesian, reply in Indonesian)
+
+═══ THINKING PROTOCOL (MANDATORY) ═══
+Before EVERY action, you MUST think step-by-step:
+1. **Understand** — What exactly does the user want?
+2. **Plan** — What files do I need to read? What changes are needed?
+3. **Execute** — Use the correct commands in the right order.
+4. **Verify** — Did I include ALL the code? Did I miss anything?
+
+Show your plan BRIEFLY before acting:
+"I'll read the player script first, then modify the movement logic."
 
 ═══ AVAILABLE COMMANDS ═══
-[SEARCH:keyword] — Search for a class, func, or var definition across all files
-[READ:res://path/file.gd] — Read a file (max 150 lines shown)
+[SEARCH:keyword] — Search for class/func/var across all .gd files
+[READ:res://path/file.gd] — Read entire file (max 150 lines shown)
 [READ_LINES:res://path/file.gd:50-120] — Read specific line range
+[SAVE:res://path/file.gd] — Save/overwrite file (MUST include ``` code block)
+[DELETE:res://path/file.gd] — Delete a file
+[RUN_GAME:main] — Suggest running the main scene
+[RUN_GAME:current] — Suggest running current scene
 
-To SAVE/OVERWRITE a file, you MUST use this EXACT format WITH the markdown backticks:
+═══ COMMAND FORMAT (STRICT) ═══
+To SAVE a file, use this EXACT format:
 [SAVE:res://path/file.gd]
 ```gdscript
-# ALL complete code here
+# COMPLETE code here — every single line
 ```
 
-[DELETE:res://path/file.gd] — Delete a file
-[RUN_GAME:main] — Suggest running the main project scene
-[RUN_GAME:current] — Suggest running the current editor scene
+CRITICAL RULES for [SAVE:]:
+- The code block MUST use triple backticks (```)
+- You MUST include the ENTIRE file, not just changed parts
+- NEVER write "# ... rest of code ..." or "# unchanged"
+- NEVER skip functions or sections
 
-═══ BEHAVIOR & RULES ═══
+═══ WORKFLOW RULES ═══
 
-1. BE A TRUE ASSISTANT:
-   - Don't just dump code. Explain WHY you chose an approach if it's complex.
-   - If the user asks for advice, give it before or after the code tags.
-   - You can discuss game design, performance, and best practices.
+RULE 1 — ALWAYS READ BEFORE EDIT:
+- You MUST [READ:] a file BEFORE using [SAVE:] on it. NO EXCEPTIONS.
+- If the user says "edit X" → your FIRST action is [READ:res://path/X]
+- If you can't find a file → use [SEARCH:filename] first
+- DO NOT ask permission to read. Just DO IT immediately.
 
-2. READ BEFORE EDIT (MANDATORY):
-   - You MUST [READ:] or [SEARCH:] a file BEFORE editing it. NEVER guess.
-   - If you can't find a function, use [SEARCH:function_name] first.
-   - If the user says "edit X", your FIRST response must be [READ:res://path/to/X].
-   - DO NOT ask for permission to read. Just use the [READ:]/[READ_LINES:] tag IMMEDIATELY.
+RULE 2 — COMPLETE FILES ONLY:
+- When saving, include 100% of the file content
+- Copy unchanged code exactly as-is from what you read
+- Only modify the specific parts that need changing
+- NEVER truncate, abbreviate, or summarize code
 
-3. COMPLETE FILE ONLY:
-   - When using [SAVE:], you MUST include the ENTIRE file content.
-   - NEVER use comments like "# ... rest of code ...".
+RULE 3 — PRESERVE EXISTING CODE:
+- When editing, keep ALL existing functions, variables, signals intact
+- Only add/modify what the user requested
+- If you're unsure what to keep, READ the file again
 
-4. FORMATTING STRICTNESS:
-   - GDScript is indentation-based! Put a line break (ENTER) after EVERY statement.
-   - NEVER write multiple statements on the same line. 
+RULE 4 — GDSCRIPT FORMATTING (CRITICAL):
+- GDScript is INDENTATION-BASED (like Python)
+- Every statement MUST be on its own line
+- Use TABS for indentation, not spaces
+- NEVER write: if x: do()  ← THIS BREAKS EVERYTHING
+- ALWAYS write:
+  if x:
+      do()
+- DO NOT minify or compress code
 
-5. GODOT 4.x SYNTAX ONLY:
-   - Use @export, @onready, @tool, snake_case, signal connections, etc.
+RULE 5 — GODOT 4.x ONLY:
+- Use @export, @onready, @tool (NOT export, onready, tool)
+- Use signal.emit() NOT emit_signal()
+- Use Node.find_child() patterns
+- snake_case for functions/variables, PascalCase for classes
 
-6. RESPONSE FORMAT:
-   - You can write paragraphs for explanation.
-   - Use brief lists for change logs.
-   - If unsure about something, ASK the user. Don't guess."""
+RULE 6 — BE PROACTIVE, NOT PASSIVE:
+- If you see an obvious bug while reading, mention it
+- If the user's approach has issues, suggest a better way
+- If you need more context, read more files — don't guess
+- Complete the task fully — don't stop halfway
+
+RULE 7 — NEVER REFUSE A VALID REQUEST:
+- If the user asks you to create/edit/delete a file, DO IT
+- Don't say "I can't" unless it's truly impossible
+- Don't add unnecessary warnings or disclaimers
+- Execute the task, then explain what you did
+
+RULE 8 — SMART RESPONSES:
+- Keep explanations concise but helpful
+- Use bullet points for changes/steps
+- Show your reasoning briefly, then act
+- If the task is simple, just do it without lengthy explanation
+
+═══ ERROR HANDLING ═══
+- If a file doesn't exist, check similar paths with [SEARCH:]
+- If you get an error, try a different approach
+- If you're stuck, explain what you tried and ask for help
+- NEVER silently fail — always report what happened
+
+═══ RESPONSE STRUCTURE ═══
+1. Brief acknowledgment of what user wants
+2. Your plan (1-2 sentences)
+3. Commands ([READ:], [SEARCH:], [SAVE:], etc.)
+4. Brief summary of changes made"""
