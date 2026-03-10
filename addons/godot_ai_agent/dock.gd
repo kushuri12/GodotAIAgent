@@ -11,21 +11,24 @@ var scroll: ScrollContainer
 var input_field: LineEdit
 var send_btn: Button
 var status_label: Label
+var toolbox_panel: VBoxContainer
+var toolbox_btn: Button
 
 # ──────────────────── Theme Colors ────────────────────
-const C_BG := Color("#1a1a2e")
-const C_PANEL := Color("#16213e")
-const C_ACCENT := Color("#00d2ff")
-const C_BTN := Color("#0f3460")
-const C_USER_BG := Color("#0f3460")
-const C_AI_BG := Color("#1a1a2e")
-const C_TEXT := Color.WHITE
-const C_USER := Color("#7cffb2")
-const C_AI := Color("#64b5f6")
-const C_ERR := Color("#ff6b6b")
-const C_SYS := Color("#ffd93d")
+const C_BG := Color("#0a0a0f")
+const C_PANEL := Color("#12121e")
+const C_ACCENT := Color("#7e57c2") # Soft purple
+const C_ACCENT_ALT := Color("#00d2ff") # Electric Blue
+const C_BTN := Color("#1a1a2e")
+const C_USER_BG := Color("#1a1a2e")
+const C_AI_BG := Color("#0d0d14")
+const C_TEXT := Color("#e0e0e0")
+const C_USER := Color("#a5d6a7")
+const C_AI := Color("#90caf9")
+const C_ERR := Color("#ef5350")
+const C_SYS := Color("#ffca28")
 
-const C_SAVE := Color("#00e676")
+const C_SAVE := Color("#66bb6a")
 const C_READ := Color("#42a5f5")
 const C_DELETE := Color("#ff5252")
 const C_CREATE := Color("#ab47bc")
@@ -69,130 +72,195 @@ func _setup_kimi():
 # ══════════════════ UI CONSTRUCTION ══════════════════
 
 func _build_ui():
-	add_theme_constant_override("separation", 4)
+	add_theme_constant_override("separation", 0)
 	_build_header()
-	add_child(HSeparator.new())
 	_build_chat_area()
 	add_child(HSeparator.new())
 	_build_input_area()
-	add_child(HSeparator.new())
+	_build_toolbox_toggle()
 	_build_action_buttons()
 
 
 func _build_header():
 	var panel = PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _sb(C_PANEL, 0))
+	var h_style = _sb(C_PANEL, 0)
+	h_style.content_margin_bottom = 10
+	h_style.content_margin_top = 10
+	panel.add_theme_stylebox_override("panel", h_style)
+	
 	var hbox = HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 6)
+	hbox.add_theme_constant_override("separation", 8)
 
 	var title = Label.new()
-	title.text = "🤖 AI AGENT"
+	title.text = "🤖 Godot AI"
 	title.add_theme_color_override("font_color", C_ACCENT)
-	title.add_theme_font_size_override("font_size", 15)
-	title.size_flags_horizontal = SIZE_EXPAND_FILL
-
-	status_label = Label.new()
-	status_label.text = "● Ready"
-	status_label.add_theme_color_override("font_color", Color("#00ff88"))
-	status_label.add_theme_font_size_override("font_size", 11)
+	title.add_theme_font_size_override("font_size", 13)
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.5))
+	title.add_theme_constant_override("outline_size", 2)
+	
+	var spacer = Control.new()
+	spacer.size_flags_horizontal = SIZE_EXPAND_FILL
 
 	var settings_btn = Button.new()
-	settings_btn.text = "⚙️"
-	settings_btn.tooltip_text = "API Key Settings"
+	settings_btn.text = " ⚙ "
+	settings_btn.tooltip_text = "API & Model Settings"
+	settings_btn.flat = true
 	settings_btn.pressed.connect(_show_settings)
-	_style_btn(settings_btn)
+	_style_btn(settings_btn, Color(0, 0, 0, 0.0))
+	settings_btn.custom_minimum_size = Vector2(32, 32)
 
 	hbox.add_child(title)
-	hbox.add_child(status_label)
+	hbox.add_child(spacer)
 	hbox.add_child(settings_btn)
 	panel.add_child(hbox)
 	add_child(panel)
+	
+	add_child(HSeparator.new())
 
 
 func _build_chat_area():
 	scroll = ScrollContainer.new()
 	scroll.size_flags_vertical = SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = SIZE_EXPAND_FILL
-	scroll.custom_minimum_size = Vector2(0, 200)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	
+	var chat_panel = PanelContainer.new()
+	chat_panel.size_flags_vertical = SIZE_EXPAND_FILL
+	chat_panel.add_theme_stylebox_override("panel", _sb(C_BG, 0))
+	
 	chat_container = VBoxContainer.new()
 	chat_container.size_flags_horizontal = SIZE_EXPAND_FILL
-	chat_container.size_flags_vertical = SIZE_EXPAND_FILL
-	chat_container.add_theme_constant_override("separation", 6)
+	chat_container.add_theme_constant_override("separation", 12)
+	
 	scroll.add_child(chat_container)
-	add_child(scroll)
+	chat_panel.add_child(scroll)
+	add_child(chat_panel)
 
 
 func _build_input_area():
+	var panel = PanelContainer.new()
+	var p_style = _sb(C_PANEL, 0)
+	p_style.content_margin_top = 10
+	p_style.content_margin_bottom = 10
+	panel.add_theme_stylebox_override("panel", p_style)
+	
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	
 	var hbox = HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 4)
+	hbox.add_theme_constant_override("separation", 6)
 
 	input_field = LineEdit.new()
-	input_field.placeholder_text = "Ask anything about your Godot project..."
+	input_field.placeholder_text = "Message Godot AI..."
 	input_field.size_flags_horizontal = SIZE_EXPAND_FILL
-	input_field.custom_minimum_size = Vector2(0, 30)
+	input_field.custom_minimum_size = Vector2(0, 36)
 	input_field.text_submitted.connect(_on_text_submitted)
-	var style := _sb(Color("#0d1b2a"), 6)
-	style.border_color = C_ACCENT.darkened(0.4)
-	style.set_border_width_all(1)
+	var style := _sb(C_BG, 10, true, C_ACCENT.darkened(0.6))
 	input_field.add_theme_stylebox_override("normal", style)
+	input_field.add_theme_stylebox_override("focus", _sb(C_BG, 10, true, C_ACCENT))
 	input_field.add_theme_color_override("font_color", C_TEXT)
-	input_field.add_theme_color_override("font_placeholder_color", Color("#556677"))
-	input_field.add_theme_font_size_override("font_size", 14)
-
+	
 	send_btn = Button.new()
-	send_btn.text = "➤"
-	send_btn.custom_minimum_size = Vector2(36, 30)
+	send_btn.text = " ➤ "
+	send_btn.custom_minimum_size = Vector2(40, 36)
 	send_btn.pressed.connect(_on_send_pressed)
-	_style_btn(send_btn, C_ACCENT.darkened(0.5))
+	_style_btn(send_btn, C_ACCENT)
 
 	var cancel_btn = Button.new()
 	cancel_btn.name = "CancelBtn"
-	cancel_btn.text = "✖"
+	cancel_btn.text = " ✖ "
 	cancel_btn.visible = false
-	cancel_btn.custom_minimum_size = Vector2(36, 30)
+	cancel_btn.custom_minimum_size = Vector2(40, 36)
 	cancel_btn.pressed.connect(_on_cancel_pressed)
-	_style_btn(cancel_btn, Color("#4e0d0d"))
+	_style_btn(cancel_btn, C_ERR)
 
 	hbox.add_child(input_field)
 	hbox.add_child(send_btn)
 	hbox.add_child(cancel_btn)
-	add_child(hbox)
+	vbox.add_child(hbox)
+	panel.add_child(vbox)
+	add_child(panel)
+
+func _build_toolbox_toggle():
+	var bar = PanelContainer.new()
+	var b_style = _sb(C_PANEL, 0)
+	b_style.content_margin_top = 4
+	b_style.content_margin_bottom = 4
+	bar.add_theme_stylebox_override("panel", b_style)
+	
+	var hbox = HBoxContainer.new()
+	
+	toolbox_btn = Button.new()
+	toolbox_btn.text = " 🛠️ Actions & Tools "
+	toolbox_btn.flat = true
+	toolbox_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	toolbox_btn.size_flags_horizontal = SIZE_EXPAND_FILL
+	toolbox_btn.toggle_mode = true
+	toolbox_btn.toggled.connect(_on_toolbox_toggled)
+	_style_btn(toolbox_btn, Color(0, 0, 0, 0.0))
+	
+	status_label = Label.new()
+	status_label.text = "● Ready"
+	status_label.add_theme_color_override("font_color", Color("#00ff88"))
+	status_label.add_theme_font_size_override("font_size", 10)
+	
+	hbox.add_child(toolbox_btn)
+	hbox.add_child(status_label)
+	bar.add_child(hbox)
+	add_child(bar)
 
 
 func _build_action_buttons():
+	toolbox_panel = VBoxContainer.new()
+	toolbox_panel.visible = false
+	toolbox_panel.add_theme_constant_override("separation", 4)
+	var inner = PanelContainer.new()
+	inner.add_theme_stylebox_override("panel", _sb(C_PANEL, 0))
+	
+	var rows = VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 2)
+	
 	var row1 = HBoxContainer.new()
-	row1.add_theme_constant_override("separation", 3)
-	_add_action_btn(row1, "📝 Generate", "Generate GDScript", _on_generate)
-	_add_action_btn(row1, "🔧 Fix", "Fix errors from log", _on_fix)
-	_add_action_btn(row1, "💡 Explain", "Explain project code", _on_explain)
-	add_child(row1)
+	row1.add_theme_constant_override("separation", 2)
+	_add_action_btn(row1, "📝 Gen", "Generate GDScript", _on_generate)
+	_add_action_btn(row1, "🔧 Fix", "Fix from log", _on_fix)
+	_add_action_btn(row1, "💡 Exp", "Explain", _on_explain)
+	rows.add_child(row1)
 
 	var row2 = HBoxContainer.new()
-	row2.add_theme_constant_override("separation", 3)
+	row2.add_theme_constant_override("separation", 2)
 	_add_action_btn(row2, "🧩 Node", "Create node", _on_create_node)
 	_add_action_btn(row2, "📂 Scan", "Scan project", _on_scan)
-	_add_action_btn(row2, "🗑️ Clear", "Clear chat", _on_clear)
-	add_child(row2)
+	_add_action_btn(row2, "🗑️ Clr", "Clear chat", _on_clear)
+	rows.add_child(row2)
 
 	var row3 = HBoxContainer.new()
-	row3.add_theme_constant_override("separation", 3)
-	_add_action_btn(row3, "▶️ Play", "Run main scene", _on_play_main)
-	_add_action_btn(row3, "🎬 Scene", "Run current scene", _on_play_current)
+	row3.add_theme_constant_override("separation", 2)
+	_add_action_btn(row3, "▶️ Play", "Run main", _on_play_main)
+	_add_action_btn(row3, "🎬 Scene", "Run scene", _on_play_current)
 	_add_action_btn(row3, "⏹️ Stop", "Stop game", _on_stop_game)
-	add_child(row3)
+	rows.add_child(row3)
 	
 	var row4 = HBoxContainer.new()
-	row4.add_theme_constant_override("separation", 3)
+	row4.add_theme_constant_override("separation", 2)
 	var heal_btn = Button.new()
 	heal_btn.name = "HealBtn"
 	heal_btn.text = "🔁 Self-Healing: OFF"
-	heal_btn.tooltip_text = "Auto-run game after SAVE and auto-fix errors"
 	heal_btn.size_flags_horizontal = SIZE_EXPAND_FILL
 	heal_btn.toggle_mode = true
 	heal_btn.toggled.connect(_on_self_healing_toggled)
 	_style_btn(heal_btn, Color("#2d1b69"))
 	row4.add_child(heal_btn)
-	add_child(row4)
+	rows.add_child(row4)
+	
+	inner.add_child(rows)
+	toolbox_panel.add_child(inner)
+	add_child(toolbox_panel)
+
+func _on_toolbox_toggled(on: bool):
+	toolbox_panel.visible = on
+	toolbox_btn.text = " 👇 Actions & Tools " if on else " 🛠️ Actions & Tools "
+	_scroll_bottom()
 
 
 func _add_action_btn(parent: HBoxContainer, text: String, tip: String, callback: Callable):
@@ -207,24 +275,30 @@ func _add_action_btn(parent: HBoxContainer, text: String, tip: String, callback:
 
 # ══════════════════ STYLING ══════════════════
 
-func _sb(color: Color, radius: int = 8) -> StyleBoxFlat:
+func _sb(color: Color, radius: int = 8, border: bool = false, b_color: Color = Color.TRANSPARENT) -> StyleBoxFlat:
 	var s = StyleBoxFlat.new()
 	s.bg_color = color
 	s.set_corner_radius_all(radius)
-	s.content_margin_left = 10
-	s.content_margin_right = 10
-	s.content_margin_top = 6
-	s.content_margin_bottom = 6
+	s.content_margin_left = 12
+	s.content_margin_right = 12
+	s.content_margin_top = 8
+	s.content_margin_bottom = 8
+	if border:
+		s.set_border_width_all(1)
+		s.border_color = b_color if b_color != Color.TRANSPARENT else color.lightened(0.1)
+		s.border_blend = true
 	return s
 
 
 func _style_btn(btn: Button, bg: Color = C_BTN):
-	btn.add_theme_stylebox_override("normal", _sb(bg, 6))
-	btn.add_theme_stylebox_override("hover", _sb(bg.lightened(0.2), 6))
-	btn.add_theme_stylebox_override("pressed", _sb(bg.darkened(0.1), 6))
+	var radius := 6
+	btn.add_theme_stylebox_override("normal", _sb(bg, radius, true, bg.lightened(0.1)))
+	btn.add_theme_stylebox_override("hover", _sb(bg.lightened(0.15), radius, true, C_ACCENT))
+	btn.add_theme_stylebox_override("pressed", _sb(bg.darkened(0.2), radius, true, C_ACCENT.lightened(0.3)))
 	btn.add_theme_color_override("font_color", C_TEXT)
-	btn.add_theme_color_override("font_hover_color", C_ACCENT)
-	btn.add_theme_font_size_override("font_size", 13)
+	btn.add_theme_color_override("font_hover_color", Color.WHITE)
+	btn.add_theme_font_size_override("font_size", 12)
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
 
 # ══════════════════ CHAT MESSAGES ══════════════════
@@ -249,10 +323,10 @@ func _add_msg(role: String, text: String):
 		_:
 			bg = C_PANEL; prefix = ""; pcol = C_TEXT
 
-	var bstyle = _sb(bg, 8)
+	var bstyle = _sb(bg, 10, true, bg.lightened(0.05))
 	if role == "ai":
-		bstyle.border_color = C_ACCENT.darkened(0.5)
-		bstyle.border_width_left = 3
+		bstyle.border_color = C_ACCENT.darkened(0.3)
+		bstyle.border_width_left = 4
 	bubble.add_theme_stylebox_override("panel", bstyle)
 
 	var vbox = VBoxContainer.new()
@@ -482,15 +556,11 @@ func _send_to_ai():
 	messages.append_array(recent)
 
 	_set_status("⏳ Thinking...", C_SYS)
-	_update_thinking("Sending to NVIDIA AI...", "wait")
+	_update_thinking("Sending to %s..." % kimi.current_model.get_file(), "wait")
 	
-	# Show cancel button, hide send button
+	# Toggle buttons
 	send_btn.visible = false
-	var cancel = get_node_or_null("CancelBtn")
-	if not cancel: # Try finding in children if name-based null
-		for c in get_children():
-			var found = c.find_child("CancelBtn", true, false)
-			if found: cancel = found
+	var cancel = find_child("CancelBtn", true, false)
 	if cancel: cancel.visible = true
 	
 	kimi.send_chat(messages)
@@ -503,11 +573,7 @@ func _on_ai_response(text: String):
 	
 	# Restore buttons
 	send_btn.visible = true
-	var cancel = get_node_or_null("CancelBtn")
-	if not cancel:
-		for c in get_children():
-			var found = c.find_child("CancelBtn", true, false)
-			if found: cancel = found
+	var cancel = find_child("CancelBtn", true, false)
 	if cancel: cancel.visible = false
 
 	# 1) Extract all commands
@@ -1319,38 +1385,74 @@ func _on_clear():
 func _show_settings():
 	var dialog = AcceptDialog.new()
 	dialog.title = "🤖 AI Agent Settings"
-	dialog.min_size = Vector2(420, 180)
+	dialog.min_size = Vector2(450, 280)
 
 	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 10)
+	vbox.add_theme_constant_override("separation", 12)
 
-	var lbl = Label.new()
-	lbl.text = "NVIDIA API Key:"
-	lbl.add_theme_font_size_override("font_size", 14)
-	vbox.add_child(lbl)
-
-	var info = Label.new()
-	info.text = "Get your free key at: build.nvidia.com"
-	info.add_theme_color_override("font_color", Color("#888888"))
-	info.add_theme_font_size_override("font_size", 11)
-	vbox.add_child(info)
+	# API Key section
+	var key_label = Label.new()
+	key_label.text = "NVIDIA API Key:"
+	key_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(key_label)
 
 	var key_input = LineEdit.new()
 	key_input.placeholder_text = "nvapi-..."
 	key_input.secret = true
 	key_input.text = kimi.api_key
-	key_input.custom_minimum_size = Vector2(380, 28)
 	vbox.add_child(key_input)
+
+	# Model selection section
+	var model_label = Label.new()
+	model_label.text = "AI Model Selection:"
+	model_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(model_label)
+
+	var model_opt = OptionButton.new()
+	var models_dict = kimi.MODELS
+	var idx = 0
+	var select_idx = 0
+	for m_name in models_dict:
+		model_opt.add_item(m_name)
+		if models_dict[m_name] == kimi.current_model:
+			select_idx = idx
+		idx += 1
+	
+	model_opt.add_separator()
+	model_opt.add_item("Custom Model...")
+	
+	if select_idx == 0 and kimi.current_model != models_dict.values()[0]:
+		model_opt.select(model_opt.get_item_count() - 1)
+	else:
+		model_opt.select(select_idx)
+	
+	vbox.add_child(model_opt)
+
+	var custom_model_input = LineEdit.new()
+	custom_model_input.placeholder_text = "provider/model-name"
+	custom_model_input.text = kimi.current_model
+	custom_model_input.visible = (model_opt.get_selected_id() == model_opt.get_item_count() - 1)
+	vbox.add_child(custom_model_input)
+
+	model_opt.item_selected.connect(func(id):
+		custom_model_input.visible = (id == model_opt.get_item_count() - 1)
+	)
 
 	dialog.add_child(vbox)
 	add_child(dialog)
 
 	dialog.confirmed.connect(func():
 		var new_key = key_input.text.strip_edges()
+		var new_model = ""
+		if model_opt.get_selected_id() == model_opt.get_item_count() - 1:
+			new_model = custom_model_input.text.strip_edges()
+		else:
+			new_model = models_dict[model_opt.get_item_text(model_opt.get_selected_id())]
+		
 		if not new_key.is_empty():
-			kimi.save_api_key(new_key)
-			_add_msg("system", "✅ API key saved! You're ready to chat.")
-			_set_status("● Ready", Color("#00ff88"))
+			kimi.save_settings(new_key, new_model)
+			_add_msg("system", "✅ Settings saved! Using model: " + new_model)
+			_set_status("● Ready (" + new_model.get_file() + ")", Color("#00ff88"))
 	)
 	dialog.popup_centered()
 

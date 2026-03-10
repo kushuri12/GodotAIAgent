@@ -1,16 +1,26 @@
 @tool
 extends Node
-## Kimi K2.5 API client — calls NVIDIA API directly from GDScript.
+## NVIDIA API client — calls NVIDIA API directly from GDScript.
 ## No Python backend needed.
 
 signal chat_completed(response_text: String)
 signal chat_error(error_message: String)
 
 const API_URL := "https://integrate.api.nvidia.com/v1/chat/completions"
-const MODEL := "moonshotai/kimi-k2-instruct"
 const CONFIG_PATH := "user://godot_ai_agent.cfg"
 
+# Common NVIDIA Models
+const MODELS = {
+	"Kimi K2 Instruct": "moonshotai/kimi-k2-instruct",
+	"Llama 3.1 405B": "meta/llama-3.1-405b-instruct",
+	"Llama 3.1 70B": "meta/llama-3.1-70b-instruct",
+	"Mistral Large 2": "mistralai/mistral-large-2-instruct",
+	"Nemotron 340B": "nvidia/nemotron-4-340b-instruct",
+	"Phi-3.5 MoE": "microsoft/phi-3.5-moe-instruct"
+}
+
 var api_key: String = ""
+var current_model: String = "moonshotai/kimi-k2-instruct"
 var _http: HTTPRequest
 var _is_busy := false
 
@@ -27,13 +37,16 @@ func load_config():
 	var cfg := ConfigFile.new()
 	if cfg.load(CONFIG_PATH) == OK:
 		api_key = cfg.get_value("api", "nvidia_key", "")
+		current_model = cfg.get_value("api", "model", "moonshotai/kimi-k2-instruct")
 
 
-func save_api_key(key: String):
+func save_settings(key: String, model: String):
 	api_key = key
+	current_model = model
 	var cfg := ConfigFile.new()
 	cfg.load(CONFIG_PATH)
 	cfg.set_value("api", "nvidia_key", key)
+	cfg.set_value("api", "model", model)
 	cfg.save(CONFIG_PATH)
 
 
@@ -68,7 +81,7 @@ func send_chat(messages: Array):
 	])
 
 	var body := JSON.stringify({
-		"model": MODEL,
+		"model": current_model,
 		"messages": msgs_copy,
 		"temperature": 0.4,
 		"max_tokens": 4096,

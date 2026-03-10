@@ -1,8 +1,8 @@
 # 🤖 Godot AI Agent — Your Professional Game Dev Partner
 
-An advanced AI sidebar plugin for **Godot 4.x** that gives you full control over your project through natural conversation. Think of it as **GitHub Copilot + Claude Artifacts**, but built specifically for the Godot Editor.
+An advanced AI sidebar plugin for **Godot 4.x** that gives you full control over your project through natural conversation. Built with a premium, modern aesthetic inspired by **Cursor**, **Antigravity**, and **VS Code Copilot**.
 
-Powered by **moonshotai/kimi-k2-instruct** via **NVIDIA API** for state-of-the-art GDScript intelligence.
+Powered by **moonshotai/kimi-k2-instruct** (or your choice of **Llama 3.1**, **Nemotron**, etc.) via **NVIDIA API**.
 
 > **🚀 No Middleman:** No Python, no external servers, and no complex setup. Everything runs natively inside Godot using GDScript.
 
@@ -10,16 +10,15 @@ Powered by **moonshotai/kimi-k2-instruct** via **NVIDIA API** for state-of-the-a
 
 ## ✨ Features that WOW
 
-| Feature                         | Description                                                                                                  |
-| :------------------------------ | :----------------------------------------------------------------------------------------------------------- |
-| 🔄 **Self-Healing Loop**        | **PREMIUM:** AI automatically runs your game after edits, monitors for crashes, and fixes bugs autonomously! |
-| 🎙️ **Conversational Assistant** | Discuss game design, performance, and logic like you're talking to a senior developer.                       |
-| 🛡️ **Unified Diff Preview**     | Review every single line of code the AI wants to change in a beautiful side-by-side view.                    |
-| ⚡ **Lightning Fast Save**      | Optimized project scanning (`fs.scan()`) for near-instant file operations.                                   |
-| ▶️ **Integrated Debugging**     | Run Main Scene, Current Scene, or Stop execution directly from the AI sidebar.                               |
-| 📝 **Full Project Access**      | AI can read, create, edit, and delete `.gd`, `.tscn`, and `.tres` files.                                     |
-| 🔧 **Smart Error Fixer**        | Reads your Godot logs and fixes script errors automatically.                                                 |
-| 🧩 **Node Architect**           | AI helps design node structures and generates the scene files (`.tscn`) for you.                             |
+| Feature                     | Description                                                                              |
+| :-------------------------- | :--------------------------------------------------------------------------------------- |
+| 💎 **Premium UI**           | A sleek, dark, glassmorphic interface that feels like a professional dev tool.           |
+| 🛠️ **Collapsible Toolbox**  | Keep your workspace clean. Toggle action buttons only when you need them.                |
+| 🤖 **Model Selector**       | Swap models on the fly (Kimi, Llama 3.1 405B, Mistral, etc.) via the Settings menu.      |
+| 🔄 **Self-Healing Loop**    | AI automatically runs your game after edits, monitors logs, and fixes bugs autonomously! |
+| 🛡️ **Unified Diff Preview** | Review every line of code change in a beautiful side-by-side view.                       |
+| ▶️ **Integrated Debugging** | Run Main Scene, Current Scene, or Stop directly from the sidebar.                        |
+| ⚡ **Lightning Fast Save**  | Optimized project scanning for near-instant file operations.                             |
 
 ---
 
@@ -31,8 +30,8 @@ The entire agent is contained within just 6 specialized GDScript files, making i
 addons/godot_ai_agent/
 ├── plugin.cfg               ← Manifest & Metadata
 ├── plugin.gd                ← Entry point & Editor integration
-├── dock.gd                  ← The "Brain" (UI, Logic, Diff Viewer, Self-Healing)
-├── kimi_client.gd           ← NVIDIA API Connector (High Performance)
+├── dock.gd                  ← Brain (UI, Logic, Diff Viewer, Self-Healing)
+├── kimi_client.gd           ← NVIDIA API Connector
 ├── project_scanner.gd       ← File tree & Context builder
 └── ghost_autocomplete.gd    ← AI-powered "Ghost" code completion
 ```
@@ -41,20 +40,10 @@ addons/godot_ai_agent/
 
 ## 🚀 Getting Started in 60 Seconds
 
-1.  **Installation**: Copy the `addons/godot_ai_agent/` folder into your project's `addons/` directory.
-2.  **Activation**: Go to **Project → Project Settings → Plugins** and enable **Godot AI Agent**.
-3.  **Authentication**: Click the **⚙️** icon in the AI Sidebar, paste your **NVIDIA API Key**.
+1.  **Installation**: Copy `addons/godot_ai_agent/` into your project's `addons/` directory.
+2.  **Activation**: Enable **Godot AI Agent** in **Project Settings → Plugins**.
+3.  **Authentication**: Click the **⚙️** icon in the header, paste your **NVIDIA API Key**.
     > 💡 Get your free key at [build.nvidia.com](https://build.nvidia.com)
-
----
-
-## 💬 Try These Commands
-
-- _"Buat sistem musuh yang mengejar pemain dan gunakan Self-Healing untuk tes sampai berhasil."_
-- _"Create a character controller with dash and double jump, then SAVE it to player.gd"_
-- _"Look at my error log and fix why the portal isn't working."_
-- _"Explain how this shader calculates the water waves."_
-- _"Generate a main menu scene with 'Start' and 'Quit' buttons."_
 
 ---
 
@@ -70,7 +59,7 @@ graph TD
     F -->|Yes| G[Auto-Run Game]
     G --> H[User Tests / Close Game]
     H --> I[Auto-Scan Logs for Errors]
-    I -->|Errors Found| J[AI Auto-Fixes Code]
+    I -->|Errors| J[AI Auto-Fixes Code]
     J --> C
     I -->|No Errors| K[Task Completed! ✅]
     F -->|No| K
