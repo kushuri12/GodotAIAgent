@@ -692,6 +692,32 @@ func _on_ai_response(text: String):
 			})
 			_send_to_ai()
 			return
+
+		# --- NEW: SYNTAX AUTO-FIX LOOP ---
+		var syntax_errors: Array[Dictionary] = []
+		for s in saves:
+			var spath: String = s["path"]
+			if spath.ends_with(".gd"):
+				var scode: String = s["code"]
+				var err_msg = _check_syntax_error(scode)
+				if err_msg != "":
+					syntax_errors.append({"path": spath, "error": err_msg})
+		
+		if syntax_errors.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
+			_read_loop_count += 1
+			var err_list := ""
+			for se in syntax_errors:
+				err_list += "\n- File: %s\n- Error: %s\n" % [se["path"], se["error"]]
+			
+			_add_msg("system", "🔍 **Syntax check failed.** Hiru is auto-fixing the code...")
+			_update_thinking("Fixing syntax errors...", "edit")
+			
+			chat_history.append({
+				"role": "user",
+				"content": "SYSTEM: The GDScript code you provided has syntax errors. You MUST fix them before I can accept the changes. Please redo the SAVE with corrected code:\n" + err_list
+			})
+			_send_to_ai()
+			return
 		
 		_pending_saves = []
 		for s in saves:
@@ -1521,6 +1547,20 @@ func _auto_check_errors():
 		_send("AUTODEBUG: I just ran the game and found these errors in the log. Please analyze and fix them automatically:\n\n" + log_text)
 	else:
 		_add_msg("system", "✅ No critical errors found in logs after test run.")
+
+
+func _check_syntax_error(code: String) -> String:
+	"""Check if GDScript code has basic syntax errors."""
+	var script = GDScript.new()
+	script.source_code = code
+	var err = script.reload()
+	if err != OK:
+		# Map common error codes
+		match err:
+			ERR_PARSE_ERROR: return "Parse Error (Check for typos, missing colons, or invalid keywords)"
+			ERR_COMPILATION_FAILED: return "Compilation Failed (Indentation or syntax error)"
+			_: return "Syntax Error (Godot Error Code: %d)" % err
+	return ""
 
 
 func _extract_run_game(text: String) -> String:
