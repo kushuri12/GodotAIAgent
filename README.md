@@ -1,4 +1,4 @@
-# 🤖 Hiru — Premium Godot AI Agent
+# 🤖 Hiru — Premium Godot Ai Agent
 
 An advanced, elite-level AI programming agent for **Godot 4.x** (named **Hiru**). Built with a premium aesthetic and capabilities inspired by **Cursor**, **Copilot**, and **Windsurf**. Hiru doesn't just autocomplete code; it reads your project files, plans its actions, and modifies your game directly—all while you watch.
 
@@ -41,7 +41,7 @@ addons/godot_ai_agent/
 ## 🚀 Getting Started in 60 Seconds
 
 1.  **Installation**: Copy `addons/godot_ai_agent/` into your project's `addons/` directory.
-2.  **Activation**: Enable **Godot AI Agent** in **Project Settings → Plugins**.
+2.  **Activation**: Enable **Godot HiruAI** in **Project Settings → Plugins**.
 3.  **Authentication**: Click the **⚙️** icon in the header, paste your **NVIDIA API Key**.
     > 💡 Get your free API key at [build.nvidia.com](https://build.nvidia.com)
 

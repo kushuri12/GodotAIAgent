@@ -93,11 +93,8 @@ func send_chat(messages: Array):
 	_last_messages = messages.duplicate(true)
 	_accumulated_text = ""
 
-	# Append formatting guard to last user message
+	# No extra warning suffix to avoid AI obsessive acknowledgment
 	var msgs_copy = messages.duplicate(true)
-	if msgs_copy.size() > 0 and msgs_copy.back().get("role") == "user":
-		var content = msgs_copy.back().get("content", "")
-		msgs_copy.back()["content"] = content + "\n\n[SYSTEM WARNING: CRITICAL! DO NOT MINIFY CODE. GDScript is indentation-based. DO NOT write code on a single line. DO NOT use semicolons. You MUST use a NEW LINE for EVERY statement. If you fail, the project will BREAK.]"
 
 	# Try streaming first, fallback to non-streaming
 	_send_streaming(msgs_copy)
@@ -282,7 +279,7 @@ func _process_sse_buffer():
 func _fallback_non_streaming(messages: Array):
 	"""Fallback to standard non-streaming request."""
 	_is_streaming = false
-	print("[AI Agent] Streaming unavailable, falling back to standard request...")
+	print("[HiruAI] Streaming unavailable, falling back to standard request...")
 
 	var headers := PackedStringArray([
 		"Authorization: Bearer " + api_key,

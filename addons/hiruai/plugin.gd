@@ -4,18 +4,23 @@ extends EditorPlugin
 var dock: Control
 
 func _enter_tree():
-	var DockScript = load("res://addons/godot_ai_agent/dock.gd")
-	dock = DockScript.new()
-	dock.name = "AIAgent"
-	add_control_to_dock(DOCK_SLOT_RIGHT_UL, dock)
+	# Use a more robust instantiation method for tool scripts
+	var dock_script = preload("res://addons/hiruai/dock.gd")
+	if dock_script:
+		dock = VBoxContainer.new()
+		dock.set_script(dock_script)
+		dock.name = "HiruAI"
+		add_control_to_dock(DOCK_SLOT_RIGHT_UL, dock)
 	
 	# Start Ghost Autocomplete
-	var GhostScript = load("res://addons/godot_ai_agent/ghost_autocomplete.gd")
-	var ghost = GhostScript.new()
-	ghost.name = "GhostAutocomplete"
-	add_child(ghost)
+	var ghost_script = preload("res://addons/hiruai/ghost_autocomplete.gd")
+	if ghost_script:
+		var ghost = Node.new()
+		ghost.set_script(ghost_script)
+		ghost.name = "GhostAutocomplete"
+		add_child(ghost)
 	
-	print("[AI Agent] ✅ Plugin loaded.")
+	print("[HiruAI] ✅ Plugin loaded.")
 
 func _exit_tree():
 	if dock:
@@ -26,4 +31,4 @@ func _exit_tree():
 	if ghost:
 		ghost.queue_free()
 		
-	print("[AI Agent] Plugin unloaded.")
+	print("[HiruAI] Plugin unloaded.")

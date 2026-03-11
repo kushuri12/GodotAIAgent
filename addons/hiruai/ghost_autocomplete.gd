@@ -10,7 +10,7 @@ var original_caret_line := -1
 var original_caret_col := -1
 
 func _ready():
-	print("[AI Agent] Ghost Autocomplete initialized.")
+	print("[HiruAI] Ghost Autocomplete initialized.")
 	debounce_timer = Timer.new()
 	debounce_timer.one_shot = true
 	debounce_timer.wait_time = 0.8

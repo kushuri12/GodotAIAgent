@@ -169,38 +169,44 @@ static func _file_icon(fname: String) -> String:
 
 
 static func search_text(query: String) -> String:
-	"""Cari custom keyword/nama fungsi di sebuah file .gd"""
+	"""Cari custom keyword/nama fungsi atau NAMA FILE."""
 	var files: Array[String] = []
 	_scan_dir("res://", files, 0)
 	
 	var results: Array[String] = []
-	var rx = RegEx.new()
-	rx.compile("(?i)" + query) # Case insensitive search
+	var q_lower = query.to_lower()
 	
 	for f in files:
-		if not f.ends_with(".gd"):
-			continue
-			
-		var file = FileAccess.open(f, FileAccess.READ)
-		if not file: continue
-		var content = file.get_as_text()
-		file.close()
+		var f_lower = f.to_lower()
+		var content := ""
+		var matches_path = q_lower in f_lower
 		
-		var lines = content.split("\n")
-		var found_in_file := false
-		for i in lines.size():
-			if rx.search(lines[i]):
-				if not found_in_file:
-					results.append("File: " + f)
-					found_in_file = true
-				results.append("  Line %d: %s" % [i + 1, lines[i].strip_edges()])
+		# Always try to search path first (Smart Search)
+		if matches_path:
+			results.append("File Match (Path): " + f)
+		
+		# Then search content if it's a script
+		if f.ends_with(".gd"):
+			var file = FileAccess.open(f, FileAccess.READ)
+			if file:
+				content = file.get_as_text()
+				file.close()
 				
-		if results.size() > 50:
-			results.append("... (Too many results, refine your search keyword)")
+				var lines = content.split("\n")
+				var found_in_content := false
+				for i in lines.size():
+					if q_lower in lines[i].to_lower():
+						if not found_in_content and not matches_path:
+							results.append("File Match (Content): " + f)
+							found_in_content = true
+						results.append("  Line %d: %s" % [i + 1, lines[i].strip_edges()])
+		
+		if results.size() > 60:
+			results.append("... (Too many results, refine your keyword)")
 			break
 			
 	if results.is_empty():
-		return "No results found for '" + query + "'"
+		return "No results found for '" + query + "'. Try different keywords."
 	return "\n".join(results)
 
 
