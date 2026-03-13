@@ -1,4 +1,4 @@
-# 🤖 HiruAI — Premium Godot AI Architect
+# 🤖 HiruAI — Godot AI Agent
 
 An advanced, elite-level AI programming agent for **Godot 4.x**. Built with a premium aesthetic and capabilities inspired by **Cursor**, **Copilot**, and **Windsurf**. Hiru doesn't just autocomplete code; it reads your project files, plans its actions, and modifies your game directly—all while you watch.
 
@@ -8,7 +8,7 @@ Powered by **GLM 4.7**, **Claude 4.6 Sonnet**, **GPT-4o**, and more via **NVIDIA
 
 ---
 
-## ✨ Pro-Agent Capabilities
+## ✨ Agent Capabilities
 
 | Feature                     | Description                                                                                      |
 | :-------------------------- | :----------------------------------------------------------------------------------------------- |
