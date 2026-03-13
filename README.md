@@ -1,8 +1,8 @@
-# 🤖 Hiru — Premium Godot Ai Agent
+# 🤖 HiruAI — Premium Godot AI Architect
 
-An advanced, elite-level AI programming agent for **Godot 4.x** (named **Hiru**). Built with a premium aesthetic and capabilities inspired by **Cursor**, **Copilot**, and **Windsurf**. Hiru doesn't just autocomplete code; it reads your project files, plans its actions, and modifies your game directly—all while you watch.
+An advanced, elite-level AI programming agent for **Godot 4.x**. Built with a premium aesthetic and capabilities inspired by **Cursor**, **Copilot**, and **Windsurf**. Hiru doesn't just autocomplete code; it reads your project files, plans its actions, and modifies your game directly—all while you watch.
 
-Powered by **moonshotai/kimi-k2-instruct** (or your choice of **Llama 3.1 405B**, **Mistral**, **Nemotron**, etc.) via the **NVIDIA API**.
+Powered by **DeepSeek-R1**, **Claude 3.5 Sonnet**, **GPT-4o**, and more via **NVIDIA NIM** and **Puter.com**.
 
 > **🚀 No Middleman:** No Python, no external servers, and no complex setup. Everything runs natively inside Godot using GDScript via direct Server-Sent Events (SSE).
 
@@ -13,12 +13,12 @@ Powered by **moonshotai/kimi-k2-instruct** (or your choice of **Llama 3.1 405B**
 | Feature                     | Description                                                                                      |
 | :-------------------------- | :----------------------------------------------------------------------------------------------- |
 | ⚡ **Real-Time Streaming**  | Watch the AI type its responses token-by-token instantly. No more waiting!                       |
-| 🧠 **Chain-of-Thought**     | Hiru is forced to plan step-by-step ("Understand -> Plan -> Execute") before coding.             |
+| 🧠 **Reasoning & Thinking** | Support for **DeepSeek-R1** and **OpenAI o1** stage-thinking (Chain-of-Thought) with live cards. |
 | 📡 **Live Activity Feed**   | Similar to Cursor, see a live feed of what the AI is currently doing _(Reading... Scanning...)_. |
 | 🔄 **Self-Healing Loop**    | AI automatically runs your game after edits, monitors logs, and fixes bugs autonomously!         |
-| 🛡️ **Auto-Fix Compliance**  | Strict GDScript formatting enforcement + automatic syntax checks to prevent bad code.            |
-| 💎 **Premium UI**           | A sleek, dark, glassmorphic interface that feels like a professional IDE dev tool.               |
+| ⚖️ **Dual API Keys**        | Support for **NVIDIA NIM** and **Puter.com** with separate, independent API keys.                |
 | 🛠️ **Unified Diff Preview** | Review every line of code change in a beautiful side-by-side view before accepting.              |
+| 🏷️ **XML & Bracket Tags**   | Highly flexible protocol detection supporting both `[BRACKET]` and `<XML>` style commands.        |
 
 ---
 
@@ -27,23 +27,25 @@ Powered by **moonshotai/kimi-k2-instruct** (or your choice of **Llama 3.1 405B**
 The entire agent is contained within an incredibly clean GDScript architecture:
 
 ```text
-addons/godot_ai_agent/
-├── plugin.cfg               ← Manifest & Metadata
+addons/hiruai/
 ├── plugin.gd                ← Entry point & Editor integration
-├── dock.gd                  ← Agent UI, Streaming Logic, System Prompts, Action Handlers
-├── kimi_client.gd           ← NVIDIA API Connector with SSE Streaming Support
-├── project_scanner.gd       ← File system abstraction, context builder & log parser
-└── ghost_autocomplete.gd    ← AI-powered "Ghost" text completion for your code
+├── dock.gd                  ← Agent UI, Streaming Logic, System Prompts
+├── kimi_client.gd           ← Multi-Provider API Connector (NVIDIA & Puter)
+├── project_scanner.gd       ← File system abstraction & context builder
+├── ghost_autocomplete.gd    ← AI-powered "Ghost" text completion
+├── hiru_protocol.gd         ← Dual-syntax command parser (XML/Brackets)
+└── hiru_utils.gd            ← UI Styles, RichText formatting & cleaning
 ```
 
 ---
 
 ## 🚀 Getting Started in 60 Seconds
 
-1.  **Installation**: Copy `addons/godot_ai_agent/` into your project's `addons/` directory.
-2.  **Activation**: Enable **Godot HiruAI** in **Project Settings → Plugins**.
-3.  **Authentication**: Click the **⚙️** icon in the header, paste your **NVIDIA API Key**.
-    > 💡 Get your free API key at [build.nvidia.com](https://build.nvidia.com)
+1.  **Installation**: Copy `addons/hiruai/` into your project's `addons/` directory.
+2.  **Activation**: Enable **HiruAI** in **Project Settings → Plugins**.
+3.  **Authentication**: Click the **⚙️** icon in the header, paste your **NVIDIA** or **Puter** keys.
+    *   **NVIDIA NIM**: [build.nvidia.com](https://build.nvidia.com)
+    *   **Puter.com**: [puter.com](https://puter.com)
 
 ---
 
