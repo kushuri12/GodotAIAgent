@@ -13,7 +13,7 @@ func _ready():
 	print("[HiruAI] Ghost Autocomplete initialized.")
 	debounce_timer = Timer.new()
 	debounce_timer.one_shot = true
-	debounce_timer.wait_time = 0.8
+	debounce_timer.wait_time = 0.4
 	debounce_timer.timeout.connect(_request_autocomplete)
 	add_child(debounce_timer)
 
@@ -48,11 +48,15 @@ func start_monitoring():
 	if current:
 		_on_script_changed(current)
 
-func find_code_edit(node: Node) -> CodeEdit:
-	if node is CodeEdit: return node
-	for child in node.get_children():
-		var found = find_code_edit(child)
-		if found: return found
+func find_code_edit(start_node: Node) -> CodeEdit:
+	var stack = [start_node]
+	while stack.size() > 0:
+		var node = stack.pop_back()
+		if not is_instance_valid(node): continue
+		if node is CodeEdit:
+			return node
+		for child in node.get_children():
+			stack.push_back(child)
 	return null
 
 func _on_script_changed(_script: Script):
@@ -167,7 +171,7 @@ func _request_autocomplete():
 	])
 	
 	var body := JSON.stringify({
-		"model": "moonshotai/kimi-k2-instruct",
+		"model": "meta/llama-3.1-8b-instruct",
 		"messages": messages,
 		"temperature": 0.2,
 		"max_tokens": 128,

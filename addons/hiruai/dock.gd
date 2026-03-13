@@ -1,8 +1,5 @@
 @tool
 extends VBoxContainer
-## Godot HiruAI Dock — Full project control.
-## Reads, writes, deletes .gd/.tscn files. Animated file cards.
-## Auto-read loop: AI reads files first, then edits intelligently.
 
 # ──────────────────── Node References ────────────────────
 var kimi: Node
@@ -13,32 +10,6 @@ var send_btn: Button
 var status_label: Label
 var toolbox_panel: VBoxContainer
 var toolbox_btn: Button
-
-# ──────────────────── Theme Colors (Premium Cursor Theme) ────────────────────
-const C_BG_DEEP := Color("#0a0a0f") # Deepest background
-const C_BG_SIDEBAR := Color("#0e0e16") # Sidebar / Tab area
-const C_BORDER := Color("#1e1e2a") # Subtle borders
-const C_ACCENT := Color("#a87ffb") # Soft neon purple
-const C_ACCENT_ALT := Color("#00d1ff") # Electric Cyan
-const C_TEXT := Color("#e0e0e6") # Main text
-const C_TEXT_DIM := Color("#8e8e9c") # Dimmed text
-const C_PANEL := Color("#12121e") # Card / Panel color
-
-const C_SAVE := Color("#4ade80") # Success Green
-const C_READ := Color("#3b82f6") # Info Blue
-const C_DELETE := Color("#f87171") # Warning Red
-const C_SYS := Color("#facc15") # System Yellow
-const C_BTN_HOVER := Color("#252538")
-
-# Aliases for backward compatibility
-const C_BTN := Color("#1a1a2e")
-const C_ERR := Color("#f87171")
-const C_BG := Color("#0a0a0f")
-const C_USER_BG := Color("#1a1a2e")
-const C_AI_BG := Color("#0d0d14")
-const C_USER := Color("#a5d6a7")
-const C_AI := Color("#90caf9")
-const C_CREATE := Color("#ab47bc")
 
 # ──────────────────── UI State ────────────────────
 var tabs: TabContainer
@@ -64,15 +35,16 @@ var _undo_stack: Array[Dictionary] = [] # [{path, old_content, type}]
 # ──────────────────── Agent State ────────────────────
 var chat_history: Array = []
 var _read_loop_count: int = 0
-const MAX_READ_LOOPS := 15
 
 var _pending_saves: Array[Dictionary] = []
+var _pending_replaces: Array[Dictionary] = []
 var _pending_deletes: Array[String] = []
 var _approval_panel: PanelContainer = null
 var _tree_sent := false
 var _read_files: Array[String] = []
 var _self_healing_enabled := false
 var _is_game_running_monitored := false
+var _log_offset: int = 0
 
 # ──────────────────── Streaming State ────────────────────
 var _streaming_bubble: PanelContainer = null
@@ -92,7 +64,7 @@ func _ready():
 	
 	# Root Styling
 	var bg = StyleBoxFlat.new()
-	bg.bg_color = C_BG_DEEP
+	bg.bg_color = HiruConst.C_BG_DEEP
 	add_theme_stylebox_override("panel", bg)
 	
 	_build_ui()
@@ -107,27 +79,40 @@ func _setup_kimi():
 	var existing = get_node_or_null("KimiClient")
 	if existing: existing.queue_free()
 	
-	var KimiScript = load("res://addons/hiruai/kimi_client.gd")
+	var kimi_path = "res://addons/hiruai/kimi_client.gd"
+	var KimiScript = load(kimi_path)
+	if not KimiScript:
+		printerr("[HiruAI] Failed to load kimi_client.gd script!")
+		return
+		
 	kimi = Node.new()
 	kimi.set_script(KimiScript)
 	kimi.name = "KimiClient"
 	add_child(kimi)
 	
-	if not kimi.chat_completed.is_connected(_on_ai_response):
-		kimi.chat_completed.connect(_on_ai_response)
-	if not kimi.chat_error.is_connected(_on_ai_error):
-		kimi.chat_error.connect(_on_ai_error)
-	# Streaming signals
-	if kimi.has_signal("stream_started"):
-		kimi.stream_started.connect(_on_stream_started)
-	if kimi.has_signal("token_received"):
-		kimi.token_received.connect(_on_token_received)
-	if kimi.has_signal("stream_finished"):
-		kimi.stream_finished.connect(_on_stream_finished)
+	# Force an update of the instance properties in tool mode
+	if kimi.has_method("load_config"):
+		kimi.call("load_config")
+	
+	# Dynamic signal connection for stability during tool script reloads
+	var signals = ["chat_completed", "chat_error", "stream_started", "token_received", "stream_finished"]
+	var callbacks = [_on_ai_response, _on_ai_error, _on_stream_started, _on_token_received, _on_stream_finished]
+	
+	for i in signals.size():
+		var sig = signals[i]
+		if kimi.has_signal(sig):
+			if not kimi.is_connected(sig, callbacks[i]):
+				kimi.connect(sig, callbacks[i])
 	
 	# Update model button now that kimi is ready
 	if _model_quick_btn and is_instance_valid(kimi) and "current_model" in kimi:
-		_model_quick_btn.text = " ⚡ " + kimi.current_model.get_file().left(12)
+		_model_quick_btn.text = " ⚡ " + str(kimi.get("current_model")).get_file().left(12)
+
+func _ensure_kimi() -> bool:
+	"""Ensures kimi is a real object, not a placeholder from a failed compile."""
+	if not is_instance_valid(kimi) or not "PROVIDER_MODELS" in kimi:
+		_setup_kimi()
+	return is_instance_valid(kimi) and "PROVIDER_MODELS" in kimi
 
 
 # ══════════════════ UI CONSTRUCTION ══════════════════
@@ -140,7 +125,7 @@ func _build_ui():
 	# Main Content Area
 	var content_wrap = PanelContainer.new()
 	content_wrap.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content_wrap.add_theme_stylebox_override("panel", _sb(C_BG_DEEP, 0))
+	content_wrap.add_theme_stylebox_override("panel", HiruUtils.sb(HiruConst.C_BG_DEEP, 0))
 	
 	tabs = TabContainer.new()
 	tabs.tabs_visible = false # We use custom nav bar
@@ -176,7 +161,7 @@ func _build_ui():
 	
 	# Thin accent border instead of HSeparator
 	var border = ColorRect.new()
-	border.color = C_BORDER
+	border.color = HiruConst.C_BORDER
 	border.custom_minimum_size.y = 1
 	add_child(border)
 	
@@ -189,7 +174,7 @@ func _build_ui():
 func _build_nav_bar():
 	var bar = PanelContainer.new()
 	bar.name = "NavBar"
-	var style = _sb(C_BG_SIDEBAR, 0)
+	var style = HiruUtils.sb(HiruConst.C_BG_SIDEBAR, 0)
 	style.content_margin_top = 6
 	style.content_margin_bottom = 2
 	style.content_margin_left = 8
@@ -218,11 +203,11 @@ func _build_nav_bar():
 	_model_quick_btn.name = "ModelQuickBtn"
 	var model_name = "Model"
 	if is_instance_valid(kimi) and "current_model" in kimi:
-		model_name = kimi.current_model.get_file().left(12)
+		model_name = str(kimi.get("current_model")).get_file().left(12)
 	_model_quick_btn.text = "⚡"
 	_model_quick_btn.flat = true
 	_model_quick_btn.add_theme_font_size_override("font_size", 11)
-	_model_quick_btn.add_theme_color_override("font_color", C_ACCENT_ALT)
+	_model_quick_btn.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
 	_model_quick_btn.tooltip_text = "Quick switch AI model"
 	_model_quick_btn.pressed.connect(_show_quick_model_menu)
 	_model_quick_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -233,7 +218,7 @@ func _build_nav_bar():
 	_token_count_label.name = "TokenCount"
 	_token_count_label.text = ""
 	_token_count_label.add_theme_font_size_override("font_size", 10)
-	_token_count_label.add_theme_color_override("font_color", C_TEXT_DIM)
+	_token_count_label.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	_token_count_label.tooltip_text = "Tokens used"
 	_nav_hbox.add_child(_token_count_label)
 	
@@ -241,8 +226,8 @@ func _build_nav_bar():
 	settings_btn.text = "⚙"
 	settings_btn.flat = true
 	settings_btn.add_theme_font_size_override("font_size", 14)
-	settings_btn.add_theme_color_override("font_color", C_TEXT_DIM)
-	settings_btn.add_theme_color_override("font_hover_color", C_ACCENT)
+	settings_btn.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
+	settings_btn.add_theme_color_override("font_hover_color", HiruConst.C_ACCENT)
 	settings_btn.pressed.connect(_show_settings)
 	settings_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_nav_hbox.add_child(settings_btn)
@@ -254,7 +239,7 @@ func _build_nav_bar():
 	indicator_bar.custom_minimum_size.y = 2
 	_nav_indicator = ColorRect.new()
 	_nav_indicator.name = "NavIndicator"
-	_nav_indicator.color = C_ACCENT
+	_nav_indicator.color = HiruConst.C_ACCENT
 	_nav_indicator.custom_minimum_size = Vector2(40, 2)
 	_nav_indicator.position = Vector2(0, 0)
 	indicator_bar.add_child(_nav_indicator)
@@ -271,19 +256,16 @@ func _add_nav_btn(parent, label: String, idx: int):
 	btn.text = label
 	btn.flat = true
 	btn.add_theme_font_size_override("font_size", 13)
-	btn.add_theme_color_override("font_color", C_TEXT_DIM)
+	btn.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	btn.add_theme_color_override("font_hover_color", Color.WHITE)
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	btn.pressed.connect(func():
-		tabs.current_tab = idx
-		_update_nav_active(idx)
-	)
+	btn.pressed.connect(_on_nav_btn_pressed.bind(idx))
 	_nav_buttons.append(btn)
 	parent.add_child(btn)
 
 func _update_nav_active(idx: int):
 	for i in _nav_buttons.size():
-		var c = C_ACCENT if i == idx else C_TEXT_DIM
+		var c = HiruConst.C_ACCENT if i == idx else HiruConst.C_TEXT_DIM
 		_nav_buttons[i].add_theme_color_override("font_color", c)
 	# Animate indicator
 	if _nav_indicator and _nav_buttons.size() > idx:
@@ -300,7 +282,7 @@ func _build_chat_area():
 	
 	var chat_panel = PanelContainer.new()
 	chat_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	chat_panel.add_theme_stylebox_override("panel", _sb(C_BG_DEEP, 0))
+	chat_panel.add_theme_stylebox_override("panel", HiruUtils.sb(HiruConst.C_BG_DEEP, 0))
 	
 	chat_container = VBoxContainer.new()
 	chat_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -324,7 +306,7 @@ func _build_agent_area():
 	header.add_theme_constant_override("separation", 8)
 	var title = Label.new()
 	title.text = "AGENT ACTIVITY"
-	title.add_theme_color_override("font_color", C_ACCENT)
+	title.add_theme_color_override("font_color", HiruConst.C_ACCENT)
 	title.add_theme_font_size_override("font_size", 11)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
@@ -333,7 +315,7 @@ func _build_agent_area():
 	step_lbl.name = "StepCount"
 	step_lbl.text = "0 steps"
 	step_lbl.add_theme_font_size_override("font_size", 9)
-	step_lbl.add_theme_color_override("font_color", C_TEXT_DIM)
+	step_lbl.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	header.add_child(step_lbl)
 	vbox.add_child(header)
 	
@@ -368,7 +350,7 @@ func _build_project_area():
 	header.add_theme_constant_override("separation", 8)
 	var title = Label.new()
 	title.text = "PROJECT CONTEXT"
-	title.add_theme_color_override("font_color", C_ACCENT_ALT)
+	title.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
 	title.add_theme_font_size_override("font_size", 11)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
@@ -377,7 +359,7 @@ func _build_project_area():
 	scan_btn.text = "🔄 Scan"
 	scan_btn.flat = true
 	scan_btn.add_theme_font_size_override("font_size", 10)
-	scan_btn.add_theme_color_override("font_color", C_ACCENT_ALT)
+	scan_btn.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
 	scan_btn.pressed.connect(_on_scan)
 	scan_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	header.add_child(scan_btn)
@@ -390,7 +372,7 @@ func _build_project_area():
 	stats.name = "FileStats"
 	stats.text = "Click 🔄 Scan to analyze your project."
 	stats.add_theme_font_size_override("font_size", 13)
-	stats.add_theme_color_override("font_color", C_TEXT_DIM)
+	stats.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	stats.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	stats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	proj_scroll.add_child(stats)
@@ -399,10 +381,49 @@ func _build_project_area():
 	margin.add_child(vbox)
 	project_tab.add_child(margin)
 
+func _build_history_area():
+	var margin = MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 12)
+	margin.add_theme_constant_override("margin_top", 12)
+	margin.add_theme_constant_override("margin_right", 12)
+	margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	
+	var header = HBoxContainer.new()
+	header.add_theme_constant_override("separation", 8)
+	var title = Label.new()
+	title.text = "CONVERSATION HISTORY"
+	title.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
+	title.add_theme_font_size_override("font_size", 11)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(title)
+	
+	var new_btn = Button.new()
+	new_btn.text = "➕ New"
+	new_btn.flat = true
+	new_btn.add_theme_font_size_override("font_size", 10)
+	new_btn.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
+	new_btn.pressed.connect(_on_new_conversation)
+	header.add_child(new_btn)
+	vbox.add_child(header)
+	
+	var scroll_hist = ScrollContainer.new()
+	scroll_hist.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	
+	var list = VBoxContainer.new()
+	list.name = "ConversationList"
+	list.add_theme_constant_override("separation", 6)
+	scroll_hist.add_child(list)
+	vbox.add_child(scroll_hist)
+	
+	margin.add_child(vbox)
+	history_tab.add_child(margin)
 
 func _build_input_area():
 	var panel = PanelContainer.new()
-	var p_style = _sb(C_PANEL, 0)
+	var p_style = HiruUtils.sb(HiruConst.C_PANEL, 0)
 	p_style.content_margin_top = 6
 	p_style.content_margin_bottom = 8
 	p_style.content_margin_left = 8
@@ -432,13 +453,13 @@ func _build_input_area():
 	input_field.gui_input.connect(_on_input_gui_input)
 	input_field.text_changed.connect(_on_input_text_changed)
 	
-	var style := _sb(Color("#0d0d18"), 10, true, C_ACCENT.darkened(0.6))
+	var style := HiruUtils.sb(Color("#0d0d18"), 10, true, HiruConst.C_ACCENT.darkened(0.6))
 	style.content_margin_top = 8
 	style.content_margin_bottom = 8
 	input_field.add_theme_stylebox_override("normal", style)
-	input_field.add_theme_stylebox_override("focus", _sb(Color("#0d0d18"), 10, true, C_ACCENT))
-	input_field.add_theme_color_override("font_color", C_TEXT)
-	input_field.add_theme_color_override("font_placeholder_color", C_TEXT_DIM)
+	input_field.add_theme_stylebox_override("focus", HiruUtils.sb(Color("#0d0d18"), 10, true, HiruConst.C_ACCENT))
+	input_field.add_theme_color_override("font_color", HiruConst.C_TEXT)
+	input_field.add_theme_color_override("font_placeholder_color", HiruConst.C_TEXT_DIM)
 	input_field.add_theme_font_size_override("font_size", 15)
 	
 	# Send button with glow
@@ -446,7 +467,7 @@ func _build_input_area():
 	send_btn.text = " ➤ "
 	send_btn.custom_minimum_size = Vector2(36, 36)
 	send_btn.pressed.connect(_on_send_pressed)
-	_style_btn(send_btn, C_ACCENT)
+	HiruUtils.style_btn(send_btn, HiruConst.C_ACCENT)
 
 	var cancel_btn = Button.new()
 	cancel_btn.name = "CancelBtn"
@@ -454,7 +475,7 @@ func _build_input_area():
 	cancel_btn.visible = false
 	cancel_btn.custom_minimum_size = Vector2(36, 36)
 	cancel_btn.pressed.connect(_on_cancel_pressed)
-	_style_btn(cancel_btn, C_ERR)
+	HiruUtils.style_btn(cancel_btn, HiruConst.C_ERR)
 
 	hbox.add_child(input_field)
 	hbox.add_child(send_btn)
@@ -465,7 +486,7 @@ func _build_input_area():
 	var hint = Label.new()
 	hint.text = "Enter ↵ send • Shift+Enter ↵ new line • Ctrl+L clear"
 	hint.add_theme_font_size_override("font_size", 9)
-	hint.add_theme_color_override("font_color", Color(C_TEXT_DIM, 0.4))
+	hint.add_theme_color_override("font_color", Color(HiruConst.C_TEXT_DIM, 0.4))
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(hint)
 	
@@ -474,7 +495,7 @@ func _build_input_area():
 
 func _build_toolbox_toggle():
 	var bar = PanelContainer.new()
-	var b_style = _sb(C_PANEL, 0)
+	var b_style = HiruUtils.sb(HiruConst.C_PANEL, 0)
 	b_style.content_margin_top = 4
 	b_style.content_margin_bottom = 4
 	bar.add_theme_stylebox_override("panel", b_style)
@@ -488,7 +509,7 @@ func _build_toolbox_toggle():
 	toolbox_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	toolbox_btn.toggle_mode = true
 	toolbox_btn.toggled.connect(_on_toolbox_toggled)
-	_style_btn(toolbox_btn, Color(0, 0, 0, 0.0))
+	HiruUtils.style_btn(toolbox_btn, Color(0, 0, 0, 0.0))
 	
 	status_label = Label.new()
 	status_label.text = "● Ready"
@@ -500,13 +521,17 @@ func _build_toolbox_toggle():
 	bar.add_child(hbox)
 	add_child(bar)
 
+func _set_status(text: String, color: Color = Color.WHITE):
+	if status_label:
+		status_label.text = text
+		status_label.add_theme_color_override("font_color", color)
 
 func _build_action_buttons():
 	toolbox_panel = VBoxContainer.new()
 	toolbox_panel.visible = false
 	toolbox_panel.add_theme_constant_override("separation", 4)
 	var inner = PanelContainer.new()
-	inner.add_theme_stylebox_override("panel", _sb(C_PANEL, 0))
+	inner.add_theme_stylebox_override("panel", HiruUtils.sb(HiruConst.C_PANEL, 0))
 	
 	var rows = VBoxContainer.new()
 	rows.add_theme_constant_override("separation", 2)
@@ -541,13 +566,186 @@ func _build_action_buttons():
 	heal_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	heal_btn.toggle_mode = true
 	heal_btn.toggled.connect(_on_self_healing_toggled)
-	_style_btn(heal_btn, Color("#2d1b69"))
+	HiruUtils.style_btn(heal_btn, Color("#2d1b69"))
 	row4.add_child(heal_btn)
+	
 	rows.add_child(row4)
 	
 	inner.add_child(rows)
 	toolbox_panel.add_child(inner)
 	add_child(toolbox_panel)
+
+func _build_context_bar():
+	var bar = PanelContainer.new()
+	bar.visible = false
+	var style = HiruUtils.sb(HiruConst.C_BG_SIDEBAR, 0)
+	style.content_margin_top = 4
+	style.content_margin_bottom = 4
+	style.content_margin_left = 8
+	style.content_margin_right = 8
+	bar.add_theme_stylebox_override("panel", style)
+	bar.name = "ContextBar"
+	
+	var hbox = HBoxContainer.new()
+	hbox.name = "ContextList"
+	hbox.add_theme_constant_override("separation", 4)
+	bar.add_child(hbox)
+	add_child(bar)
+
+func _update_context_bar():
+	var bar = find_child("ContextBar", true, false)
+	if not bar: return
+	
+	bar.visible = not _context_files.is_empty()
+	var list = bar.find_child("ContextList", true, false)
+	if not list: return
+	
+	for c in list.get_children(): c.queue_free()
+	
+	for path in _context_files:
+		var btn = Button.new()
+		btn.text = "📄 " + path.get_file() + " ✕"
+		btn.flat = true
+		btn.add_theme_font_size_override("font_size", 9)
+		btn.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
+		btn.pressed.connect(_on_context_bar_detach.bind(path))
+		list.add_child(btn)
+
+func _on_context_bar_detach(path: String):
+	_context_files.erase(path)
+	_update_context_bar()
+
+func _update_token_display(tokens: int):
+	_total_tokens += tokens
+	if _token_count_label:
+		_token_count_label.text = " [ %d tokens ] " % _total_tokens
+
+func _show_quick_model_menu():
+	if not _ensure_kimi(): return
+	var menu = PopupMenu.new()
+	var provider = kimi.get("current_provider")
+	var provider_models = kimi.get("PROVIDER_MODELS")
+	var models_dict = provider_models.get(provider, {})
+	var current = kimi.get("current_model")
+	
+	var i = 0
+	for m_name in models_dict:
+		menu.add_radio_check_item(m_name, i)
+		if models_dict[m_name] == current:
+			menu.set_item_checked(i, true)
+		i += 1
+		
+	menu.add_separator()
+	menu.add_item("⚙️ Full Settings...", 99)
+	
+	# Pass data via binds to avoid local variable capture in tool mode
+	menu.id_pressed.connect(_on_quick_model_selected.bind(models_dict, provider))
+	
+	add_child(menu)
+	menu.popup(Rect2(_model_quick_btn.global_position + Vector2(0, 30), Vector2.ZERO))
+
+func _on_quick_model_selected(id: int, models_dict: Dictionary, provider: String):
+	if id == 99:
+		_show_settings()
+		return
+		
+	var names = models_dict.keys()
+	if id < 0 or id >= names.size(): return
+	
+	var selected_name = names[id]
+	var selected_model = models_dict[selected_name]
+	kimi.call("save_settings", kimi.get("nvidia_key"), kimi.get("puter_key"), selected_model, provider)
+	_add_msg("system", "⚡ Switched to: " + selected_name + " (" + provider + ")")
+	_set_status("● Ready (" + selected_name + ")", Color("#00ff88"))
+
+func _show_command_palette():
+	var commands = {
+		"/fix": "Analyzes logs and suggests surgical fixes",
+		"/scan": "Refreshes project structure for AI context",
+		"/clear": "Resets current chat history",
+		"/undo": "Reverts last file operations",
+		"/save": "Saves attached files as context",
+		"/explain": "Explains current code base",
+		"/node": "Generates a new node structure",
+		"/ui": "Advice on premium UI design",
+		"/opt": "Performance optimization tips"
+	}
+	_show_command_list(commands, "⚡ Quick Commands (Ctrl+K)")
+
+func _show_slash_suggestions(filter: String):
+	var all_commands = {
+		"/fix": "Fix errors from logs",
+		"/scan": "Refresh file tree",
+		"/clear": "Reset chat",
+		"/undo": "Undo file changes",
+		"/save": "Contextual save",
+		"/explain": "Code analysis",
+		"/node": "Scene creation",
+		"/ui": "UI architect",
+		"/opt": "Optimization"
+	}
+	var filtered = {}
+	for k in all_commands:
+		if k.begins_with(filter):
+			filtered[k] = all_commands[k]
+	
+	if not filtered.is_empty():
+		_show_command_list(filtered, "💡 Suggestions")
+	elif _cmd_popup:
+		_cmd_popup.hide()
+
+func _show_command_list(commands: Dictionary, title_text: String):
+	if not _cmd_popup or not is_instance_valid(_cmd_popup):
+		_cmd_popup = PopupPanel.new()
+		_cmd_popup.name = "CommandPopup"
+		var popup_style = HiruUtils.sb(HiruConst.C_PANEL, 8, true, HiruConst.C_BORDER)
+		_cmd_popup.add_theme_stylebox_override("panel", popup_style)
+		add_child(_cmd_popup)
+	
+	for c in _cmd_popup.get_children():
+		c.queue_free()
+		
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 2)
+	
+	var title = Label.new()
+	title.text = title_text
+	title.add_theme_font_size_override("font_size", 10)
+	title.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
+	vbox.add_child(title)
+	
+	for cmd in commands:
+		var btn = Button.new()
+		btn.text = "  %-12s  ▸  %s" % [cmd, commands[cmd]]
+		btn.flat = true
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.add_theme_font_size_override("font_size", 11)
+		btn.add_theme_color_override("font_color", HiruConst.C_ACCENT if cmd.begins_with("/") else HiruConst.C_TEXT)
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		btn.pressed.connect(_on_command_suggestion_pressed.bind(cmd))
+		vbox.add_child(btn)
+		
+	_cmd_popup.add_child(vbox)
+	
+	# Position above input field
+	var pos = input_field.get_global_rect().position
+	pos.y -= commands.size() * 26 + 40
+	_cmd_popup.popup(Rect2(pos, Vector2(320, 0)))
+
+func _handle_slash_command(cmd: String) -> bool:
+	var parts = cmd.split(" ", false)
+	if parts.is_empty(): return false
+	
+	match parts[0]:
+		"/fix": _on_fix(); return true
+		"/scan": _on_scan(); return true
+		"/clear": _on_clear(); return true
+		"/undo": _on_undo(); return true
+		"/explain": _on_explain(); return true
+		"/node": _on_create_node(); return true
+		"/ui": _send("Give me elite UI design advice based on your skills."); return true
+		"/opt": _send("Analyze my code for performance bottlenecks using your optimization skills."); return true
+	return false
 
 func _on_toolbox_toggled(on: bool):
 	toolbox_panel.visible = on
@@ -561,36 +759,8 @@ func _add_action_btn(parent: HBoxContainer, text: String, tip: String, callback:
 	btn.tooltip_text = tip
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.pressed.connect(callback)
-	_style_btn(btn)
+	HiruUtils.style_btn(btn)
 	parent.add_child(btn)
-
-
-# ══════════════════ STYLING ══════════════════
-
-func _sb(color: Color, radius: int = 8, border: bool = false, b_color: Color = Color.TRANSPARENT) -> StyleBoxFlat:
-	var s = StyleBoxFlat.new()
-	s.bg_color = color
-	s.set_corner_radius_all(radius)
-	s.content_margin_left = 10
-	s.content_margin_right = 10
-	s.content_margin_top = 6
-	s.content_margin_bottom = 6
-	if border:
-		s.set_border_width_all(1)
-		s.border_color = b_color if b_color != Color.TRANSPARENT else color.lightened(0.1)
-		s.border_blend = true
-	return s
-
-
-func _style_btn(btn: Button, bg: Color = C_BTN):
-	var radius := 6
-	btn.add_theme_stylebox_override("normal", _sb(bg, radius, true, bg.lightened(0.1)))
-	btn.add_theme_stylebox_override("hover", _sb(bg.lightened(0.15), radius, true, C_ACCENT))
-	btn.add_theme_stylebox_override("pressed", _sb(bg.darkened(0.2), radius, true, C_ACCENT.lightened(0.3)))
-	btn.add_theme_color_override("font_color", C_TEXT)
-	btn.add_theme_color_override("font_hover_color", Color.WHITE)
-	btn.add_theme_font_size_override("font_size", 14)
-	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
 
 # ══════════════════ CHAT MESSAGES ══════════════════
@@ -600,31 +770,31 @@ func _add_msg(role: String, text: String):
 	bubble.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	
 	# Role-specific styling
-	var border_color = C_BORDER
-	var bg_color = C_BG_DEEP
-	var pcol: Color = C_TEXT
+	var border_color = HiruConst.C_BORDER
+	var bg_color = HiruConst.C_BG_DEEP
+	var pcol: Color = HiruConst.C_TEXT
 	var prefix: String = "✦ HIRU"
 	
 	match role:
 		"user":
 			prefix = "YOU"
-			pcol = C_ACCENT_ALT
-			border_color = C_ACCENT_ALT.darkened(0.6)
+			pcol = HiruConst.C_ACCENT_ALT
+			border_color = HiruConst.C_ACCENT_ALT.darkened(0.6)
 			bg_color = Color("#0f1018")
 		"ai":
 			prefix = "✦ HIRU"
-			pcol = C_ACCENT
-			border_color = C_ACCENT.darkened(0.5)
+			pcol = HiruConst.C_ACCENT
+			border_color = HiruConst.C_ACCENT.darkened(0.5)
 		"system":
 			prefix = "SYSTEM"
-			pcol = C_SYS
-			border_color = C_SYS.darkened(0.7)
+			pcol = HiruConst.C_SYS
+			border_color = HiruConst.C_SYS.darkened(0.7)
 		"error":
 			prefix = "ERROR"
 			pcol = Color("#ff5555")
 			border_color = Color("#ff5555").darkened(0.6)
 	
-	var bstyle = _sb(bg_color, 6, true, border_color)
+	var bstyle = HiruUtils.sb(bg_color, 6, true, border_color)
 	bstyle.border_width_left = 3
 	bstyle.border_width_right = 0
 	bstyle.border_width_top = 0
@@ -648,7 +818,7 @@ func _add_msg(role: String, text: String):
 	
 	var timestamp = Label.new()
 	timestamp.text = Time.get_time_string_from_system().left(5)
-	timestamp.add_theme_color_override("font_color", Color(C_TEXT_DIM, 0.4))
+	timestamp.add_theme_color_override("font_color", Color(HiruConst.C_TEXT_DIM, 0.4))
 	timestamp.add_theme_font_size_override("font_size", 8)
 	header.add_child(timestamp)
 	
@@ -660,16 +830,11 @@ func _add_msg(role: String, text: String):
 	copy_btn.text = "📋"
 	copy_btn.flat = true
 	copy_btn.add_theme_font_size_override("font_size", 9)
-	copy_btn.add_theme_color_override("font_color", C_TEXT_DIM)
+	copy_btn.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	copy_btn.add_theme_color_override("font_hover_color", Color.WHITE)
 	copy_btn.tooltip_text = "Copy message"
 	copy_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	copy_btn.pressed.connect(func():
-		DisplayServer.clipboard_set(text)
-		copy_btn.text = "✅"
-		await get_tree().create_timer(2.0).timeout
-		if is_instance_valid(copy_btn): copy_btn.text = "📋"
-	)
+	copy_btn.pressed.connect(_on_copy_pressed.bind(text, copy_btn))
 	header.add_child(copy_btn)
 	
 	vbox.add_child(header)
@@ -680,8 +845,8 @@ func _add_msg(role: String, text: String):
 	content.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	content.selection_enabled = true
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	content.text = _fmt(text)
-	content.add_theme_color_override("default_color", C_TEXT if role != "user" else C_ACCENT_ALT)
+	content.text = HiruUtils.fmt(text)
+	content.add_theme_color_override("default_color", HiruConst.C_TEXT if role != "user" else HiruConst.C_ACCENT_ALT)
 	content.add_theme_font_size_override("normal_font_size", 15)
 	vbox.add_child(content)
 
@@ -695,36 +860,14 @@ func _add_msg(role: String, text: String):
 	_scroll_bottom()
 
 
-func _fmt(text: String) -> String:
-	var r = text
-	var rx = RegEx.new()
-	
-	# 1. Multiline Code Blocks (Tolerate typo '```gdscript extends Node')
-	rx.compile("```([a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```")
-	for m in rx.search_all(r):
-		var lang = m.get_string(1).strip_edges()
-		if lang == "": lang = "code"
-		var content = m.get_string(2).strip_edges()
-		var header = "[b][color=#a87ffb] 📝 " + lang + " [/color][/b]\n"
-		var block = header + "[color=#a8c7fa][code]" + content + "[/code][/color]\n"
-		r = r.replace(m.get_string(), block)
-		
-	# 2. Headings (Markdown ###)
-	rx.compile("#{1,4}\\s+(.*)")
-	for m in rx.search_all(r):
-		r = r.replace(m.get_string(), "[b][color=#ffffff]" + m.get_string(1) + "[/color][/b]")
+func _on_copy_pressed(text: String, btn: Button):
+	DisplayServer.clipboard_set(text)
+	btn.text = "✅"
+	await get_tree().create_timer(1.5).timeout
+	if is_instance_valid(btn):
+		btn.text = "📋"
 
-	# 3. Bold
-	rx.compile("\\*\\*([^*]+)\\*\\*")
-	for m in rx.search_all(r):
-		r = r.replace(m.get_string(), "[b]" + m.get_string(1) + "[/b]")
-		
-	# 4. Inline code
-	rx.compile("`([^`]+)`")
-	for m in rx.search_all(r):
-		r = r.replace(m.get_string(), "[color=#ffb48a]" + m.get_string(1) + "[/color]")
-		
-	return r
+
 
 
 func _scroll_bottom():
@@ -750,9 +893,9 @@ func _show_thinking(status: String = "AI is thinking...", phase: String = "scan"
 		"read": Color("#64b5f6"),
 		"edit": Color("#00e676"),
 		"think": Color("#ab47bc")
-	}.get(phase, C_ACCENT)
+	}.get(phase, HiruConst.C_ACCENT)
 	
-	var st = _sb(Color.TRANSPARENT, 0)
+	var st = HiruUtils.sb(Color.TRANSPARENT, 0)
 	panel.add_theme_stylebox_override("panel", st)
 
 	var margin = MarginContainer.new()
@@ -811,7 +954,7 @@ func _update_thinking(status: String, phase: String = "wait"):
 		"read": Color("#64b5f6"),
 		"edit": Color("#00e676"),
 		"think": Color("#ab47bc")
-	}.get(phase, C_ACCENT)
+	}.get(phase, HiruConst.C_ACCENT)
 	
 	var spinner_node = p.find_child("Spinner", true, false)
 	if spinner_node: spinner_node.text = phase_icon
@@ -856,7 +999,7 @@ func _add_welcome():
 	var logo = Label.new()
 	logo.text = "✦"
 	logo.add_theme_font_size_override("font_size", 28)
-	logo.add_theme_color_override("font_color", C_ACCENT)
+	logo.add_theme_color_override("font_color", HiruConst.C_ACCENT)
 	brand_hbox.add_child(logo)
 	var brand = Label.new()
 	brand.text = "HiruAI"
@@ -868,7 +1011,7 @@ func _add_welcome():
 	var lbl = Label.new()
 	lbl.text = "Your AI coding assistant for Godot"
 	lbl.add_theme_font_size_override("font_size", 13)
-	lbl.add_theme_color_override("font_color", C_TEXT_DIM)
+	lbl.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(lbl)
 	
@@ -876,23 +1019,24 @@ func _add_welcome():
 	var cards_label = Label.new()
 	cards_label.text = "Quick Start"
 	cards_label.add_theme_font_size_override("font_size", 11)
-	cards_label.add_theme_color_override("font_color", C_TEXT_DIM)
+	cards_label.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	cards_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(cards_label)
 	
 	var cards = VBoxContainer.new()
 	cards.add_theme_constant_override("separation", 6)
-	_add_quick_card(cards, "📝", "Generate Script", "Create a new GDScript from description", func(): _send("/generate"))
-	_add_quick_card(cards, "🔧", "Fix Errors", "Auto-detect and fix project errors", func(): _on_fix())
-	_add_quick_card(cards, "💡", "Explain Code", "Get explanations of your code", func(): _on_explain())
-	_add_quick_card(cards, "🧩", "Create Node", "Build new scene & script hierarchy", func(): _on_create_node())
+	_add_quick_card(cards, "📝", "Generate Script", "Create a new GDScript from description", _on_quick_generate)
+	_add_quick_card(cards, "🔧", "Fix Errors", "Auto-detect and fix project errors", _on_fix)
+	_add_quick_card(cards, "💡", "Explain Code", "Get explanations of your code", _on_explain)
+	_add_quick_card(cards, "🧩", "Create Node", "Build new scene & script hierarchy", _on_create_node)
 	vbox.add_child(cards)
 	
 	# Version info
 	var ver = Label.new()
-	ver.text = "v2.0 • Powered by NVIDIA AI"
+	ver.text = "v2.5 Elite • Senior Architect Mode Active"
+
 	ver.add_theme_font_size_override("font_size", 9)
-	ver.add_theme_color_override("font_color", Color(C_TEXT_DIM, 0.5))
+	ver.add_theme_color_override("font_color", Color(HiruConst.C_TEXT_DIM, 0.5))
 	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(ver)
 	
@@ -904,9 +1048,21 @@ func _add_welcome():
 	var tween = create_tween().set_ease(Tween.EASE_OUT)
 	tween.tween_property(center, "modulate:a", 1.0, 0.5)
 
+func _on_quick_generate():
+	_send("/generate")
+
+func _on_quick_fix():
+	_send("/fix")
+
+func _on_quick_explain():
+	_send("/explain")
+
+func _on_quick_create_node():
+	_send("/create_node")
+
 func _add_quick_card(parent: VBoxContainer, icon: String, title: String, desc: String, callback: Callable):
 	var card = PanelContainer.new()
-	var st = _sb(C_PANEL, 8, true, C_BORDER)
+	var st = HiruUtils.sb(HiruConst.C_PANEL, 8, true, HiruConst.C_BORDER)
 	st.content_margin_top = 8
 	st.content_margin_bottom = 8
 	st.content_margin_left = 12
@@ -933,13 +1089,13 @@ func _add_quick_card(parent: VBoxContainer, icon: String, title: String, desc: S
 	var d = Label.new()
 	d.text = desc
 	d.add_theme_font_size_override("font_size", 10)
-	d.add_theme_color_override("font_color", C_TEXT_DIM)
+	d.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	text_vbox.add_child(d)
 	hbox.add_child(text_vbox)
 	
 	var arrow = Label.new()
 	arrow.text = "→"
-	arrow.add_theme_color_override("font_color", C_TEXT_DIM)
+	arrow.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	hbox.add_child(arrow)
 	
 	card.add_child(hbox)
@@ -1005,7 +1161,7 @@ func _show_file_suggestions(query: String):
 	if not _file_suggestion_popup or not is_instance_valid(_file_suggestion_popup):
 		_file_suggestion_popup = PopupPanel.new()
 		_file_suggestion_popup.name = "FileMentionPopup"
-		var popup_style = _sb(C_PANEL, 8, true, C_BORDER)
+		var popup_style = HiruUtils.sb(HiruConst.C_PANEL, 8, true, HiruConst.C_BORDER)
 		_file_suggestion_popup.add_theme_stylebox_override("panel", popup_style)
 		add_child(_file_suggestion_popup)
 	
@@ -1035,7 +1191,7 @@ func _show_file_suggestions(query: String):
 	var title = Label.new()
 	title.text = "Attach File"
 	title.add_theme_font_size_override("font_size", 10)
-	title.add_theme_color_override("font_color", C_TEXT_DIM)
+	title.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 	vbox.add_child(title)
 	
 	for m in matches:
@@ -1044,22 +1200,10 @@ func _show_file_suggestions(query: String):
 		btn.flat = true
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		btn.add_theme_font_size_override("font_size", 11)
-		btn.add_theme_color_override("font_color", C_TEXT)
+		btn.add_theme_color_override("font_color", HiruConst.C_TEXT)
 		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		var bind_m = m
-		btn.pressed.connect(func():
-			_attach_file_to_context(bind_m)
-			var cur_text = input_field.text
-			# Remove the @query part
-			var words = cur_text.split(" ")
-			for i in words.size():
-				if words[i].begins_with("@") and query in words[i].to_lower():
-					words.remove_at(i)
-					break
-			input_field.text = " ".join(words)
-			input_field.set_caret_column(input_field.text.length())
-			_file_suggestion_popup.hide()
-		)
+		btn.pressed.connect(_on_file_mention_pressed.bind(bind_m, query))
 		vbox.add_child(btn)
 		
 	_file_suggestion_popup.add_child(vbox)
@@ -1080,23 +1224,30 @@ func _attach_file_to_context(path: String):
 			btn.text = "📄 " + path.get_file() + " ✕"
 			btn.flat = true
 			btn.add_theme_font_size_override("font_size", 9)
-			var sb = _sb(Color("#2c2c3a"), 4)
+			var sb = HiruUtils.sb(Color("#2c2c3a"), 4)
 			sb.content_margin_top = 2
 			sb.content_margin_bottom = 2
 			btn.add_theme_stylebox_override("normal", sb)
-			btn.pressed.connect(func():
-				_context_files.erase(path)
-				_update_context_bar()
-				btn.queue_free()
-				if _context_files.is_empty():
-					_attachments_bar.visible = false
-			)
+			btn.pressed.connect(_on_detach_file.bind(path, btn))
 			_attachments_bar.add_child(btn)
+
+func _on_detach_file(path: String, btn: Button):
+	if path in _context_files:
+		_context_files.erase(path)
+		_update_context_bar()
+	if is_instance_valid(btn):
+		btn.queue_free()
+	if _context_files.is_empty() and _attachments_bar:
+		_attachments_bar.visible = false
 
 func _send(text: String):
 	if text.strip_edges().is_empty():
 		return
-	if kimi.is_busy():
+	if not _ensure_kimi():
+		_add_msg("error", "AI Client (Kimi) is stuck. Please toggle HiruAI plugin or restart Godot.")
+		return
+			
+	if kimi.call("is_busy"):
 		_add_msg("system", "Please wait for the current response.")
 		return
 	
@@ -1136,22 +1287,36 @@ func _send(text: String):
 
 
 func _send_to_ai():
-	var messages: Array = [ {"role": "system", "content": _system_prompt()}]
+	var messages: Array = [{"role": "system", "content": _system_prompt()}]
+	
+	# --- Dynamic Context Injection ---
+	var context_text := ""
+	if !_context_files.is_empty():
+		var Scanner = load("res://addons/hiruai/project_scanner.gd")
+		context_text = "\n\n=== ATTACHED CONTEXT ===\n"
+		for path in _context_files:
+			context_text += "\n--- %s ---\n%s\n" % [path, Scanner.read_file(path)]
+		context_text += "=========================\n"
+
 	# Token saving: only send last 6 messages
-	var recent = chat_history.slice(maxi(0, chat_history.size() - 6))
+	var history_copy = chat_history.duplicate(true)
+	if history_copy.size() > 0 and history_copy[-1]["role"] == "user":
+		history_copy[-1]["content"] += context_text
+		
+	var recent = history_copy.slice(maxi(0, history_copy.size() - 6))
 	messages.append_array(recent)
 
-	_set_status("⏳ Thinking...", C_SYS)
+	_set_status("⏳ Thinking...", HiruConst.C_SYS)
 	_step_counter += 1
 	_last_request_time = Time.get_ticks_msec()
-	_add_activity("⏳", "Step %d — Sending to %s..." % [_step_counter, kimi.current_model.get_file()], Color("#ffd93d"))
+	_add_activity("⏳", "Step %d — Sending to %s..." % [_step_counter, str(kimi.get("current_model")).get_file()], Color("#ffd93d"))
 	
 	# Toggle buttons
 	send_btn.visible = false
 	var cancel = find_child("CancelBtn", true, false)
 	if cancel: cancel.visible = true
 	
-	kimi.send_chat(messages)
+	kimi.call("send_chat", messages)
 
 
 # ══════════════════ STREAMING HANDLERS ══════════════════
@@ -1191,7 +1356,7 @@ func _on_stream_started():
 	_streaming_content.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_streaming_content.scroll_active = false
 	_streaming_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_streaming_content.add_theme_color_override("default_color", C_TEXT)
+	_streaming_content.add_theme_color_override("default_color", HiruConst.C_TEXT)
 	_streaming_content.add_theme_font_size_override("normal_font_size", 15)
 	_streaming_content.text = ""
 	vbox.add_child(_streaming_content)
@@ -1206,11 +1371,11 @@ func _on_token_received(token: String):
 	_streaming_raw_text += token
 	if _streaming_content and is_instance_valid(_streaming_content):
 		# 1. Update live display (CLEANED)
-		var display = _clean_display_text(_streaming_raw_text)
-		_streaming_content.text = _fmt(display)
+		var display = HiruUtils.clean_display_text(_streaming_raw_text)
+		_streaming_content.text = HiruUtils.fmt(display)
 		
 		# 2. Live Thinking Update (compact preview only — full text goes to collapsible card later)
-		var thought = _extract_thoughts(_streaming_raw_text, true) # Partial allowed
+		var thought = HiruProtocol.extract_thoughts(_streaming_raw_text, true) # Partial allowed
 		if thought != "":
 			var preview = thought.strip_edges().replace("\n", " ").substr(0, 80)
 			if thought.length() > 80:
@@ -1256,15 +1421,18 @@ func _on_ai_response(text: String):
 	if cancel: cancel.visible = false
 
 	# 1) Extract all commands
-	var searches = _extract_searches(text)
-	var reads = _extract_reads(text)
-	var read_lines = _extract_read_lines(text)
-	var saves = _extract_saves(text)
-	var deletes = _extract_deletes(text)
-	var run_req = _extract_run_game(text)
+	var searches = HiruProtocol.extract_searches(text)
+	var reads = HiruProtocol.extract_reads(text)
+	var read_lines = HiruProtocol.extract_read_lines(text)
+	var scene_scans = HiruProtocol.extract_scene_scans(text)
+	var skill_sync = "[SKILL_SYNC]" in text
+	var saves = HiruProtocol.extract_saves(text)
+	var replaces = HiruProtocol.extract_replaces(text) # NEW: line-specific replacements
+	var deletes = HiruProtocol.extract_deletes(text)
+	var run_req = HiruProtocol.extract_run_game(text)
 
 	# 1) PRE-ACTION: Show Activity Chips for commands
-	var thoughts = _extract_thoughts(text)
+	var thoughts = HiruProtocol.extract_thoughts(text)
 	if thoughts != "":
 		_add_thought_card_with_text(thoughts)
 	
@@ -1275,17 +1443,24 @@ func _on_ai_response(text: String):
 	if saves.size() > 0:
 		for s in saves:
 			var lines = s["content"].split("\n").size()
-			_add_activity_bubble("💾 Processing %s (%d lines of code)..." % [s["path"].get_file(), lines], Color("#00e676"))
+			_add_activity_bubble("💾 Saving %s (%d lines)..." % [s["path"].get_file(), lines], HiruConst.C_SAVE)
+	if replaces.size() > 0:
+		for r in replaces:
+			_add_activity_bubble("💉 Replacing lines %d-%d in %s..." % [r["start"], r["end"], r["path"].get_file()], Color("#22d3ee"))
 	if deletes.size() > 0:
-		_add_activity_bubble("🗑️ Deleting %d file(s)..." % deletes.size(), Color("#f87171"))
+		_add_activity_bubble("🗑️ Deleting %d file(s)..." % deletes.size(), HiruConst.C_DELETE)
 
 	# 1.1) Show CLEAN AI message (no raw code blocks)
 	chat_history.append({"role": "assistant", "content": text})
-	var clean_text = _clean_display_text(text)
+	var clean_text = HiruUtils.clean_display_text(text)
 	
 	# ONLY add message if it wasn't already streamed
-	if not _streaming_bubble and clean_text != "":
-		_add_msg("ai", clean_text)
+	if not _streaming_bubble:
+		if clean_text != "":
+			_add_msg("ai", clean_text)
+		elif text.strip_edges() != "" and thoughts == "":
+			# AI sent something but it was all filtered out and no thoughts either?
+			_add_msg("ai", "⚙️ *Technical protocol executed. (No textual message provided)*")
 	elif _streaming_bubble and is_instance_valid(_streaming_bubble):
 		# If it was streamed, just finalize the last bubble
 		var hint = _streaming_bubble.find_child("StreamHint", true, false)
@@ -1294,16 +1469,33 @@ func _on_ai_response(text: String):
 		# Ensure formatted properly and CLEANED
 		var rtxt = _streaming_bubble.find_child("RichTextLabel", true, false)
 		if rtxt:
-			rtxt.text = _fmt(clean_text) # Use CLEAN text, not raw!
+			if clean_text == "":
+				rtxt.text = "[i](Logic only response)[/i]"
+			else:
+				rtxt.text = HiruUtils.fmt(clean_text)
 			rtxt.visible_ratio = 1.0
 			
 		_streaming_bubble = null # Mark as finished
 	
-	_set_status("● Ready", Color("#00ff88"))
+	# Status check — only set Ready if NO pending cycles/actions
+	var has_actions = (searches.size() > 0 or reads.size() > 0 or read_lines.size() > 0 or scene_scans.size() > 0 or skill_sync)
+	var has_saves = (saves.size() > 0 or replaces.size() > 0 or deletes.size() > 0)
+	
+	if has_saves:
+		_set_status("● Waiting for Approval", HiruConst.C_SYS)
+		# Store for processing
+		_pending_saves = saves
+		_pending_replaces = replaces
+		_pending_deletes = deletes
+		_show_approval_ui()
+	elif has_actions:
+		_set_status("● Processing Action...", HiruConst.C_SYS)
+	else:
+		_set_status("● Ready", Color("#00ff88"))
 
 
 	# 3) Handle SEARCH requests
-	if searches.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
+	if searches.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
 		_read_loop_count += 1
 		_add_activity("🔍", "Searching %d keyword(s)..." % searches.size(), Color("#9c27b0"))
 		var Scanner = load("res://addons/hiruai/project_scanner.gd")
@@ -1323,7 +1515,7 @@ func _on_ai_response(text: String):
 		return
 
 	# 3a) Handle READ requests first — auto-read loop
-	if reads.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
+	if reads.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
 		_read_loop_count += 1
 		_add_activity("📖", "Reading %d file(s)..." % reads.size(), Color("#42a5f5"))
 		var Scanner = load("res://addons/hiruai/project_scanner.gd")
@@ -1334,7 +1526,7 @@ func _on_ai_response(text: String):
 				break
 			_add_activity("📖", "Reading " + read_path.get_file() + "...", Color("#64b5f6"))
 			var content = Scanner.read_file(read_path)
-			_add_file_card(read_path, "Analyzed", C_READ)
+			_add_file_card(read_path, "Analyzed", HiruConst.C_READ)
 			file_contents += "\n--- %s ---\n%s\n" % [read_path, content]
 			if read_path not in _read_files:
 				_read_files.append(read_path)
@@ -1353,14 +1545,14 @@ func _on_ai_response(text: String):
 		return
 
 	# 3b) Handle READ_LINES requests
-	if read_lines.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
+	if read_lines.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
 		_read_loop_count += 1
 		var Scanner = load("res://addons/hiruai/project_scanner.gd")
 		var file_contents := ""
 		for rl in read_lines:
 			_add_activity("📖", "Reading lines %d-%d of %s..." % [rl["start"], rl["end"], rl["path"].get_file()], Color("#64b5f6"))
 			var content = Scanner.read_file_lines(rl["path"], rl["start"], rl["end"])
-			_add_file_card(rl["path"], "Analyzed", C_READ.darkened(0.2), "#L%d-%d" % [rl["start"], rl["end"]])
+			_add_file_card(rl["path"], "Analyzed", HiruConst.C_READ.darkened(0.2), "#L%d-%d" % [rl["start"], rl["end"]])
 			file_contents += "\n--- %s (lines %d-%d) ---\n%s\n" % [rl["path"], rl["start"], rl["end"], content]
 		chat_history.append({
 			"role": "user",
@@ -1369,12 +1561,41 @@ func _on_ai_response(text: String):
 		_send_to_ai()
 		return
 
-	# 4) If there are SAVE/DELETE ops, validate planning and READ-before-SAVE
-	if saves.size() > 0 or deletes.size() > 0:
+	# 3c) Handle SCENE_SCAN requests
+	if scene_scans.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
+		_read_loop_count += 1
+		var Scanner = load("res://addons/hiruai/project_scanner.gd")
+		var scene_trees := ""
+		for spath in scene_scans:
+			_add_activity("👁️", "Scanning scene hierarchy: " + spath.get_file() + "...", Color("#a87ffb"))
+			var tree = Scanner.scan_scene(spath)
+			_add_file_card(spath, "SCANNED", Color("#a87ffb"))
+			scene_trees += "\n" + tree + "\n"
+		chat_history.append({
+			"role": "user",
+			"content": "Scene hierarchies:\n" + scene_trees + "\nNow you know the node structure. Proceed."
+		})
+		_send_to_ai()
+		return
+
+	# 3d) Handle SKILL_SYNC requests
+	if skill_sync and _read_loop_count < HiruConst.MAX_READ_LOOPS:
+		_read_loop_count += 1
+		var all_skills_advice = _sync_skills()
+		_add_activity("🔮", "Evolving... Skills Synchronized.", Color("#f472b6"))
+		chat_history.append({
+			"role": "user",
+			"content": "Skill Synchronization Complete. Specialized knowledge injected:\n" + all_skills_advice + "\nApply these principles to your current task."
+		})
+		_send_to_ai()
+		return
+
+	# 4) If there are SAVE/REPLACE/DELETE ops, validate planning and READ-before-SAVE
+	if saves.size() > 0 or replaces.size() > 0 or deletes.size() > 0:
 		# ── FORCED PLANNING PHASE ──
 		# If AI jumped straight to SAVE without reading/searching ANYTHING first,
 		# force a planning cycle: auto-read target files + demand [THOUGHT:] plan.
-		if _read_loop_count == 0 and _read_loop_count < MAX_READ_LOOPS:
+		if _read_loop_count == 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
 			_read_loop_count += 1
 			_add_msg("system", "🧠 **Planning phase** — Hiru is analyzing your project before making changes...")
 			_add_activity("🧠", "Planning: reading files before acting", Color("#ab47bc"))
@@ -1387,8 +1608,15 @@ func _on_ai_response(text: String):
 				if FileAccess.file_exists(s["path"]) and s["path"] not in _read_files:
 					var content = Scanner.read_file(s["path"])
 					auto_read_contents += "\n--- %s ---\n%s\n" % [s["path"], content]
-					_add_file_card(s["path"], "Auto-Read", C_READ)
+					_add_file_card(s["path"], "Auto-Read", HiruConst.C_READ)
 					_read_files.append(s["path"])
+			
+			for r in replaces:
+				if FileAccess.file_exists(r["path"]) and r["path"] not in _read_files:
+					var content = Scanner.read_file(r["path"])
+					auto_read_contents += "\n--- %s ---\n%s\n" % [r["path"], content]
+					_add_file_card(r["path"], "Auto-Read", HiruConst.C_READ)
+					_read_files.append(r["path"])
 			
 			# Also auto-read files referenced in delete targets
 			for d_path in deletes:
@@ -1413,36 +1641,37 @@ func _on_ai_response(text: String):
 			_send_to_ai()
 			return
 		
-		# Validate: block SAVE if file was never READ (force AI to read first)
-		var unread_saves: Array[String] = []
+		# Validate: block SAVE/REPLACE if file was never READ (force AI to read first)
+		var unread_targets: Array[String] = []
 		for s in saves:
-			var spath: String = s["path"]
-			# Allow new file creation (file doesn't exist yet)
-			if FileAccess.file_exists(spath) and spath not in _read_files:
-				unread_saves.append(spath)
+			if FileAccess.file_exists(s["path"]) and s["path"] not in _read_files:
+				unread_targets.append(s["path"])
+		for r in replaces:
+			if FileAccess.file_exists(r["path"]) and r["path"] not in _read_files:
+				unread_targets.append(r["path"])
 		
-		if unread_saves.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
-			# AI tried to SAVE without reading — force a read cycle
+		if unread_targets.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
+			# AI tried to modify without reading — force a read cycle
 			_read_loop_count += 1
 			var Scanner = load("res://addons/hiruai/project_scanner.gd")
 			var file_contents := ""
-			for upath in unread_saves:
+			for upath in unread_targets:
 				_add_activity("⚠️", "Must read " + upath.get_file() + " before editing...", Color("#ffd93d"))
 				var content = Scanner.read_file(upath)
-				_add_file_card(upath, "READ", C_READ)
+				_add_file_card(upath, "READ", HiruConst.C_READ)
 				file_contents += "\n--- %s ---\n%s\n" % [upath, content]
 				if upath not in _read_files:
 					_read_files.append(upath)
-			_add_msg("system", "⚠️ AI tried to edit without reading first. Auto-reading %d file(s)..." % unread_saves.size())
+			_add_msg("system", "⚠️ AI tried to edit without reading first. Auto-reading %d file(s)..." % unread_targets.size())
 			chat_history.append({
 				"role": "user",
-				"content": "SYSTEM: You tried to SAVE files without reading them first. Here are the current contents. You MUST preserve all existing code and only change what was requested:\n" + file_contents + "\nNow redo the edit correctly. Include the COMPLETE file content."
+				"content": "SYSTEM: You tried to modify files without reading them first. Here are the current contents. Now redo the edit correctly.\n" + file_contents
 			})
 			_send_to_ai()
 			return
 
 		# --- CHECK MISSING PRELOAD DEPENDENCIES ---
-		var missing_preloads = _find_missing_preloads(saves)
+		var missing_preloads = HiruValidator.find_missing_preloads(saves)
 		var missing_preload_paths: Array[String] = []
 		var syntax_errors: Array[Dictionary] = []
 		
@@ -1475,7 +1704,7 @@ func _on_ai_response(text: String):
 			# Only check syntax if the file wasn't already flagged for missing preloads
 			if spath.ends_with(".gd") and spath not in missing_preload_paths:
 				var scode: String = s["content"]
-				var err_msg = _check_syntax_error(scode)
+				var err_msg = HiruValidator.check_syntax_error(scode)
 				if err_msg != "":
 					syntax_errors.append({"path": spath, "error": err_msg})
 		
@@ -1483,7 +1712,7 @@ func _on_ai_response(text: String):
 		for tmp_path in _temp_written_paths:
 			_delete_project_file(tmp_path)
 		
-		if syntax_errors.size() > 0 and _read_loop_count < MAX_READ_LOOPS:
+		if syntax_errors.size() > 0 and _read_loop_count < HiruConst.MAX_READ_LOOPS:
 			_read_loop_count += 1
 			var err_list := ""
 			for se in syntax_errors:
@@ -1501,22 +1730,21 @@ func _on_ai_response(text: String):
 			_send_to_ai()
 			return
 		
-		_pending_saves = []
-		for s in saves:
-			_pending_saves.append(s)
-		_pending_deletes = []
-		for d in deletes:
-			_pending_deletes.append(d)
+		_pending_saves = saves
+		_pending_replaces = replaces
+		_pending_deletes = deletes
 
 		# Show pending file cards
-		for save_data in _pending_saves:
-			_add_file_card(save_data["path"], "PENDING SAVE", C_SYS)
-		for del_path in _pending_deletes:
-			_add_file_card(del_path, "PENDING DELETE", C_SYS)
+		for s in _pending_saves:
+			_add_file_card(s["path"], "PENDING SAVE", HiruConst.C_SYS)
+		for r in _pending_replaces:
+			_add_file_card(r["path"], "PENDING REPLACE", Color("#22d3ee"), "#L%d-%d" % [r["start"], r["end"]])
+		for d in _pending_deletes:
+			_add_file_card(d, "PENDING DELETE", HiruConst.C_SYS)
 
 		# Show accept / reject buttons
 		_show_approval_ui()
-		_set_status("⏸ Waiting for approval...", C_SYS)
+		_set_status("● Waiting for Approval", Color("#facc15"))
 		return
 
 	# Handle RUN_GAME requests
@@ -1526,57 +1754,14 @@ func _on_ai_response(text: String):
 
 	# LIMIT FALLBACK: Prevent silent hanging
 	var wants_to_action = reads.size() > 0 or read_lines.size() > 0 or searches.size() > 0 or saves.size() > 0 or deletes.size() > 0
-	if wants_to_action and _read_loop_count >= MAX_READ_LOOPS:
-		_add_msg("error", "⚠️ AI reached maximum internal steps (%d). Stopped to prevent infinite loop." % MAX_READ_LOOPS)
+	if wants_to_action and _read_loop_count >= HiruConst.MAX_READ_LOOPS:
+		_add_msg("error", "⚠️ AI reached maximum internal steps (%d). Stopped to prevent infinite loop." % HiruConst.MAX_READ_LOOPS)
 		_set_status("● Limit Reached", Color("#ffbb00"))
 		return
 
 	_set_status("● Ready", Color("#00ff88"))
 
 
-func _clean_display_text(text: String) -> String:
-	"""STRICT technical tags removal for streaming and final display."""
-	var result = text
-	var rx = RegEx.new()
-
-	# 1. Clear THOUGHTS completely (even if partial/open-ended at the end)
-	# This regex matches from [THOUGHT: to either the closing ] or the end of string $
-	rx.compile("\\[THOUGHT:[\\s\\S]*?(\\]|$)")
-	result = rx.sub(result, "", true)
-
-	# 2. Clear technical commands [SAVE:], [READ:], etc. (even if partial/open at end)
-	rx.compile("\\[(SAVE|READ|READ_LINES|SEARCH|DELETE):[\\s\\S]*?(\\]|$)")
-	result = rx.sub(result, "", true)
-
-	# 3. Clear code blocks (even if partial/open at end)
-	rx.compile("```[\\s\\S]*?(```|$)")
-	result = rx.sub(result, "", true)
-
-	# 4. Clean up repetitive robotic phrases (AI Loops)
-	var robotic_phrases = [
-		"User keeps greeting without specifying a task",
-		"To break the cycle, I'll proactively",
-		"Saya akan memastikan untuk tidak meminimifikasi",
-		"Saya memahami peringatan sistem ini"
-	]
-	for phrase in robotic_phrases:
-		if phrase in result:
-			var rob_rx = RegEx.new()
-			rob_rx.compile("(?m)^.*" + phrase + ".*$[\n\r]*")
-			result = rob_rx.sub(result, "", true)
-
-	# 5. Hide [RESULT:] tags
-	result = result.replace("[RESULT:]\n", "").replace("[RESULT:]", "").replace("[RESULT: ]\n", "").replace("[RESULT: ]", "")
-
-	# 6. Clean up leftovers
-	rx.compile("(?m)^\\s*(HT:|SAVE:|READ:|READ_LINES:|SEARCH:|DELETE:).*$")
-	result = rx.sub(result, "", true)
-
-	# 5. Clean up extra blank lines
-	while "\n\n\n" in result:
-		result = result.replace("\n\n\n", "\n\n")
-
-	return result.strip_edges()
 
 
 func _show_approval_ui():
@@ -1602,16 +1787,14 @@ func _show_approval_ui():
 		var lbl = Label.new()
 		lbl.text = "💾 " + s_data["path"].get_file()
 		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		lbl.add_theme_color_override("font_color", C_SYS)
+		lbl.add_theme_color_override("font_color", HiruConst.C_SYS)
 		
 		var btn = Button.new()
 		btn.text = "Preview Diff"
 		btn.flat = true
 		btn.add_theme_color_override("font_color", Color("#42a5f5"))
 		# Create local scope binding for lambda
-		var path_bind = s_data["path"]
-		var content_bind = s_data["content"]
-		btn.pressed.connect(func(): _preview_diff(path_bind, content_bind))
+		btn.pressed.connect(_preview_diff.bind(s_data["path"], s_data["content"]))
 		
 		row.add_child(lbl)
 		row.add_child(btn)
@@ -1622,7 +1805,7 @@ func _show_approval_ui():
 		var lbl = Label.new()
 		lbl.text = "🗑️ " + d_path.get_file()
 		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		lbl.add_theme_color_override("font_color", C_ERR)
+		lbl.add_theme_color_override("font_color", HiruConst.C_ERR)
 		row.add_child(lbl)
 		vbox.add_child(row)
 
@@ -1697,55 +1880,7 @@ func _preview_diff(path: String, new_content: String):
 			if font_size: ce.add_theme_font_size_override("font_size", font_size)
 
 	# --- Unified Diff Calculation (LCS) ---
-	var old_lines = old_content.split("\n")
-	var new_lines = new_content.split("\n")
-	
-	var m = old_lines.size()
-	var n = new_lines.size()
-	var diff_ops = []
-	
-	# Max ~3162x3162 grid, prevents long freezing on massive files
-	if m * n < 10000000:
-		var L = []
-		for i in range(m + 1):
-			var row = []
-			row.resize(n + 1)
-			row.fill(0)
-			L.append(row)
-			
-		for i in range(1, m + 1):
-			for j in range(1, n + 1):
-				if old_lines[i - 1] == new_lines[j - 1]:
-					L[i][j] = L[i - 1][j - 1] + 1
-				else:
-					L[i][j] = maxi(L[i - 1][j], L[i][j - 1])
-					
-		var i = m
-		var j = n
-		
-		while i > 0 and j > 0:
-			if old_lines[i - 1] == new_lines[j - 1]:
-				diff_ops.push_front({"type": "=", "text": old_lines[i - 1]})
-				i -= 1
-				j -= 1
-			elif L[i - 1][j] > L[i][j - 1]:
-				diff_ops.push_front({"type": "-", "text": old_lines[i - 1]})
-				i -= 1
-			else:
-				diff_ops.push_front({"type": "+", "text": new_lines[j - 1]})
-				j -= 1
-				
-		while i > 0:
-			diff_ops.push_front({"type": "-", "text": old_lines[i - 1]})
-			i -= 1
-		while j > 0:
-			diff_ops.push_front({"type": "+", "text": new_lines[j - 1]})
-			j -= 1
-			
-	else:
-		# Fallback for massive files: Just show old then new to prevent engine freeze
-		for line in old_lines: diff_ops.append({"type": "-", "text": line})
-		for line in new_lines: diff_ops.append({"type": "+", "text": line})
+	var diff_ops = HiruDiff.generate_unified_diff(old_content, new_content)
 			
 	var diff_lines = PackedStringArray()
 	for op in diff_ops:
@@ -1773,7 +1908,7 @@ func _preview_diff(path: String, new_content: String):
 
 func _on_accept_changes():
 	"""User approved — apply all pending saves and deletes."""
-	_set_status("⏳ Saving...", C_SYS)
+	_set_status("⏳ Saving...", HiruConst.C_SYS)
 	
 	# Clear previous undo stack
 	_undo_stack.clear()
@@ -1782,6 +1917,7 @@ func _on_accept_changes():
 	if _approval_panel and is_instance_valid(_approval_panel):
 		_approval_panel.queue_free()
 		_approval_panel = null
+
 
 	var fs = EditorInterface.get_resource_filesystem() if Engine.is_editor_hint() else null
 	
@@ -1804,18 +1940,46 @@ func _on_accept_changes():
 			
 		var ok = _write_project_file(path, save_data["content"])
 		if ok:
-			var diff_stats = _calculate_diff(old_text, save_data["content"])
-			_add_file_card(path, "Edited", C_SAVE, diff_stats)
-			if fs:
-				fs.update_file(path)
-				# Force reload if it's an open script
-				# This can be slow, so we only do it for GDScript
-				if path.ends_with(".gd"):
-					var res = load(path)
-					if res is Script:
-						res.reload()
+			var diff_stats = HiruDiff.calculate_diff_stats(old_text, save_data["content"])
+			_add_file_card(path, "Saved", HiruConst.C_SAVE, diff_stats)
+			if fs: fs.update_file(path)
+			if path.ends_with(".gd"):
+				var res = load(path)
+				if res is Script: res.reload()
 		else:
-			_add_file_card(path, "SAVE FAILED", C_ERR)
+			_add_file_card(path, "SAVE FAILED", HiruConst.C_ERR)
+
+	# Apply Replaces (Surgical)
+	for r_data in _pending_replaces:
+		var path = r_data["path"]
+		if not FileAccess.file_exists(path): continue
+		
+		var f = FileAccess.open(path, FileAccess.READ)
+		var old_text = f.get_as_text()
+		f.close()
+		
+		var lines = old_text.split("\n")
+		var new_lines: Array[String] = []
+		
+		# Lines are 1-indexed for the AI
+		var start_i = r_data["start"] - 1
+		var end_i = r_data["end"] - 1
+		
+		for i in range(lines.size()):
+			if i < start_i or i > end_i:
+				new_lines.append(lines[i])
+			elif i == start_i:
+				new_lines.append(r_data["content"])
+		
+		var final_text = "\n".join(new_lines)
+		
+		_undo_stack.append({"path": path, "content": old_text, "type": "save"})
+		
+		if _write_project_file(path, final_text):
+			_add_file_card(path, "Replaced L%d-%d" % [r_data["start"], r_data["end"]], Color("#22d3ee"))
+			if fs: fs.update_file(path)
+			if path.ends_with(".gd"):
+				var res = load(path); if res is Script: res.reload()
 	
 	# Apply deletes
 	for d_path in _pending_deletes:
@@ -1832,12 +1996,13 @@ func _on_accept_changes():
 		
 		var ok = _delete_project_file(d_path)
 		if ok:
-			_add_file_card(d_path, "Deleted", C_DELETE)
+			_add_file_card(d_path, "Deleted", HiruConst.C_DELETE)
 			if fs: fs.update_file(d_path)
 		else:
 			_add_msg("error", "Failed to delete: " + d_path)
 	
 	_pending_saves = []
+	_pending_replaces = []
 	_pending_deletes = []
 	_set_status("● Ready", Color("#00ff88"))
 	_add_msg("system", "✅ All changes applied! Use `/undo` to revert.")
@@ -1856,6 +2021,7 @@ func _on_accept_changes():
 			EditorInterface.get_inspector().edit(edited)
 
 	_pending_saves.clear()
+	_pending_replaces.clear()
 	_pending_deletes.clear()
 	_set_status("● Ready", Color("#00ff88"))
 	
@@ -1864,7 +2030,7 @@ func _on_accept_changes():
 		_on_play_main()
 
 func _on_cancel_pressed():
-	kimi.cancel_request()
+	kimi.call("cancel_request")
 	_hide_thinking()
 	
 	# Restore buttons
@@ -1897,227 +2063,16 @@ func _on_reject_changes():
 func _on_ai_error(error: String):
 	_hide_thinking()
 	_add_msg("error", error)
-	_set_status("● Error", C_ERR)
+	_set_status("● Error", HiruConst.C_ERR)
 
 
-func _set_status(text: String, color: Color):
-	if status_label:
-		status_label.text = text
-		status_label.add_theme_color_override("font_color", color)
+
 
 
 # ══════════════════ FILE OPERATIONS ══════════════════
 
-func _extract_searches(text: String) -> Array[String]:
-	"""Extract [SEARCH:keyword] tags."""
-	var results: Array[String] = []
-	var rx = RegEx.new()
-	rx.compile("\\[SEARCH:([^\\]]+)\\]")
-	for m in rx.search_all(text):
-		var k = m.get_string(1).strip_edges()
-		if k != "" and k not in results:
-			results.append(k)
-	return results
 
 
-func _extract_reads(text: String) -> Array[String]:
-	"""Extract [READ:path] tags from AI response."""
-	var paths: Array[String] = []
-	var rx = RegEx.new()
-	# Match either [READ:path] or <parameter=file>path</parameter> (fallback for weird models)
-	rx.compile("\\[READ:([^\\]]+)\\]|<parameter=file>\\s*(.*?)\\s*<\\/parameter>")
-	for m in rx.search_all(text):
-		var p = m.get_string(1)
-		if p == "":
-			p = m.get_string(2)
-		
-		# Bersihkan spasi dan newline jika AI typo
-		p = p.replace(" ", "").replace("\n", "").replace("\r", "")
-			
-		# AI often forgets res:// when hallucinating tool calls
-		if p != "" and not p.begins_with("res://"):
-			p = "res://" + p.trim_prefix("/")
-			
-		if p != "" and p not in paths:
-			paths.append(p)
-	return paths
-
-
-func _extract_read_lines(text: String) -> Array[Dictionary]:
-	"""Extract [READ_LINES:path:start-end] tags."""
-	var results: Array[Dictionary] = []
-	var rx = RegEx.new()
-	# Allow any characters for path until the last colon before digits
-	rx.compile("\\[READ_LINES:\\s*(.+?)\\s*:\\s*(\\d+)\\s*-\\s*(\\d+)\\s*\\]")
-	for m in rx.search_all(text):
-		var p = m.get_string(1).replace(" ", "").replace("\n", "").replace("\r", "")
-		if not p.begins_with("res://"):
-			p = "res://" + p.trim_prefix("/")
-		results.append({
-			"path": p,
-			"start": int(m.get_string(2)),
-			"end": int(m.get_string(3))
-		})
-	return results
-
-
-func _extract_thoughts(text: String, allow_partial: bool = false) -> String:
-	"""Extract [THOUGHT:plan] tags from AI response."""
-	var rx = RegEx.new()
-	if allow_partial:
-		rx.compile("\\[THOUGHT:([\\s\\S]*?)(?:\\]|$)")
-	else:
-		rx.compile("\\[THOUGHT:([\\s\\S]*?)\\]")
-	
-	var m = rx.search(text)
-	if m:
-		return m.get_string(1).strip_edges()
-	return ""
-
-
-func _extract_saves(text: String) -> Array[Dictionary]:
-	"""Extract [SAVE:path] + code block pairs, or fuzzily match markdown code blocks!"""
-	var saves: Array[Dictionary] = []
-	var claimed_blocks: Array[String] = []
-	
-	# Pass 1: Strict [SAVE:path] with backticks (The intended way)
-	var rx_strict = RegEx.new()
-	rx_strict.compile("\\[SAVE:([^\\]]+)\\][\\s\\S]*?```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```")
-	var strict_matches = rx_strict.search_all(text)
-	for m in strict_matches:
-		var raw_content = m.get_string(2)
-		saves.append({
-			"path": m.get_string(1).strip_edges(),
-			"content": _clean_extraneous_gdscript(raw_content)
-		})
-		claimed_blocks.append(raw_content)
-
-	# Pass 2: Fuzzy fallback (AI forgot [SAVE:] but wrote `res://...` nearby, OR inside comment)
-	var rx_code = RegEx.new()
-	rx_code.compile("```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```")
-	var code_matches = rx_code.search_all(text)
-	
-	for m_code in code_matches:
-		var raw_content = m_code.get_string(1)
-		
-		# Skip if we already captured this exact block via Pass 1
-		var is_claimed = false
-		for cb in claimed_blocks:
-			if raw_content.strip_edges() == cb.strip_edges():
-				is_claimed = true
-				break
-		if is_claimed: continue
-		
-		var start_pos = m_code.get_start()
-		# Look at the text strictly before this code block (up to 150 chars backwards)
-		var check_start = maxi(0, start_pos - 150)
-		var pre_text = text.substr(check_start, start_pos - check_start)
-		
-		# Match any Godot file path (e.g. res://inventory.gd)
-		var rx_path = RegEx.new()
-		rx_path.compile("(res://[a-zA-Z0-9_\\-\\./\\\\]+\\.[a-zA-Z0-9_]+)")
-		var path_matches = rx_path.search_all(pre_text)
-		
-		var found_path = ""
-		if path_matches.size() > 0:
-			# Grab the CLOSEST path right above the code block
-			found_path = path_matches[path_matches.size() - 1].get_string(1).strip_edges()
-		else:
-			# Fallback: Check if the first line of the code block is a path comment # res://...
-			var first_line = raw_content.split("\n")[0].strip_edges()
-			if first_line.begins_with("#") and "res://" in first_line:
-				var c_rx = RegEx.new()
-				c_rx.compile("(res://[a-zA-Z0-9_\\-\\./\\\\]+\\.[a-zA-Z0-9_]+)")
-				var cm = c_rx.search(first_line)
-				if cm: found_path = cm.get_string(1).strip_edges()
-				
-		if found_path != "":
-			saves.append({
-				"path": found_path,
-				"content": _clean_extraneous_gdscript(raw_content)
-			})
-			claimed_blocks.append(raw_content)
-
-	# Pass 3: [SAVE:path] strictly but NO backticks at all (AI completely hallucinated and dumped text)
-	var rx_no_backticks = RegEx.new()
-	rx_no_backticks.compile("\\[SAVE:([^\\]]+)\\]")
-	var no_bt_matches = rx_no_backticks.search_all(text)
-	for i in no_bt_matches.size():
-		var path = no_bt_matches[i].get_string(1).strip_edges()
-		
-		# Skip if we already got this path
-		var already_has = false
-		for s in saves:
-			if s["path"] == path:
-				already_has = true
-				break
-		if already_has: continue
-		
-		var start_pos = no_bt_matches[i].get_end()
-		var end_pos = text.length()
-		if i + 1 < no_bt_matches.size():
-			end_pos = no_bt_matches[i + 1].get_start()
-			
-		var next_tag = text.find("[", start_pos)
-		if next_tag != -1 and not text.substr(next_tag, 6).begins_with("[node") and not text.substr(next_tag, 4).begins_with("[gd_"):
-			end_pos = mini(end_pos, next_tag)
-			
-		var block_content = text.substr(start_pos, end_pos - start_pos).strip_edges()
-		if block_content != "":
-			saves.append({
-				"path": path,
-				"content": _clean_extraneous_gdscript(_strip_code_boilerplate(block_content))
-			})
-
-	return saves
-
-func _clean_extraneous_gdscript(code: String) -> String:
-	"""Removes accidental 'gdscript' word glued to 'extends Node'."""
-	var result = code.strip_edges()
-	if result.begins_with("gdscript"):
-		var after = result.substr(8).strip_edges()
-		if after.begins_with("extends ") or after.begins_with("class_name ") or after.begins_with("@") or after.begins_with("func ") or after.begins_with("var ") or after.begins_with("const ") or after.begins_with("signal ") or after.begins_with("#"):
-			# It was hallucinated, strip the 'gdscript' out.
-			return after
-	return result
-
-
-func _strip_code_boilerplate(block: String) -> String:
-	"""Finds where the actual GDScript begins when backticks are absent."""
-	var lines = block.split("\n")
-	var result = []
-	var in_code = false
-	for line in lines:
-		var ln = line.strip_edges()
-		if not in_code:
-			var test_ln = ln
-			if test_ln.begins_with("gdscript"):
-				test_ln = test_ln.substr(8).strip_edges()
-				
-			if test_ln.begins_with("extends ") or test_ln.begins_with("class_name ") or test_ln.begins_with("@") or test_ln.begins_with("func ") or test_ln.begins_with("var ") or test_ln.begins_with("const ") or test_ln.begins_with("signal ") or test_ln.begins_with("#"):
-				in_code = true
-				if test_ln != ln:
-					line = line.replace("gdscript", "").strip_edges()
-			elif test_ln.begins_with("[gd_scene ") or test_ln.begins_with("[gd_resource "):
-				in_code = true
-				if test_ln != ln:
-					line = line.replace("gdscript", "").strip_edges()
-		if in_code:
-			result.append(line)
-			
-	if result.is_empty():
-		return block.strip_edges()
-	return "\n".join(result).strip_edges()
-
-
-func _extract_deletes(text: String) -> Array[String]:
-	"""Extract [DELETE:path] tags."""
-	var paths: Array[String] = []
-	var rx = RegEx.new()
-	rx.compile("\\[DELETE:([^\\]]+)\\]")
-	for m in rx.search_all(text):
-		paths.append(m.get_string(1).strip_edges())
-	return paths
 
 
 func _write_project_file(path: String, content: String) -> bool:
@@ -2174,7 +2129,7 @@ func _add_activity(icon: String, text: String, color: Color = Color.WHITE):
 	_activity_log.append(entry)
 	
 	# 2. Update Thinking Panel (Chat Tab)
-	_update_thinking(icon + " " + text, _phase_from_icon(icon))
+	_update_thinking(icon + " " + text, HiruUtils.phase_from_icon(icon))
 	
 	# 3. Update Activity List (Agent Tab)
 	if not _activity_panel: return
@@ -2218,11 +2173,11 @@ func _add_activity(icon: String, text: String, color: Color = Color.WHITE):
 func _add_thought_card(seconds: int):
 	"""Minimal thought duration chip (no expandable content)."""
 	if seconds < 1: seconds = 1
-	var dur_str = _format_duration(seconds)
+	var dur_str = HiruUtils.format_duration(seconds)
 	
 	var chip = PanelContainer.new()
 	chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var st = _sb(Color("#0e0e18"), 8, true, Color("#2a1f4e"))
+	var st = HiruUtils.sb(Color("#0e0e18"), 8, true, Color("#2a1f4e"))
 	st.content_margin_top = 6
 	st.content_margin_bottom = 6
 	st.content_margin_left = 12
@@ -2255,12 +2210,12 @@ func _add_thought_card(seconds: int):
 
 func _add_thought_card_with_text(plan: String):
 	"""Premium collapsible thought card — compact chip with expandable scroll content."""
-	var dur_str = _format_duration(_thinking_duration_sec)
+	var dur_str = HiruUtils.format_duration(_thinking_duration_sec)
 	
 	# ── Outer Wrapper ──
 	var wrapper = PanelContainer.new()
 	wrapper.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var wrap_style = _sb(Color("#0e0e18"), 8, true, Color("#2a1f4e"))
+	var wrap_style = HiruUtils.sb(Color("#0e0e18"), 8, true, Color("#2a1f4e"))
 	wrap_style.content_margin_top = 0
 	wrap_style.content_margin_bottom = 0
 	wrap_style.content_margin_left = 0
@@ -2281,13 +2236,13 @@ func _add_thought_card_with_text(plan: String):
 	chip.add_theme_color_override("font_hover_color", Color("#ce93d8"))
 	chip.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	
-	var chip_normal = _sb(Color.TRANSPARENT, 8)
+	var chip_normal = HiruUtils.sb(Color.TRANSPARENT, 8)
 	chip_normal.content_margin_top = 7
 	chip_normal.content_margin_bottom = 7
 	chip_normal.content_margin_left = 10
 	chip_normal.content_margin_right = 10
 	chip.add_theme_stylebox_override("normal", chip_normal)
-	var chip_hover = _sb(Color("#161625"), 8)
+	var chip_hover = HiruUtils.sb(Color("#161625"), 8)
 	chip_hover.content_margin_top = 7
 	chip_hover.content_margin_bottom = 7
 	chip_hover.content_margin_left = 10
@@ -2300,7 +2255,7 @@ func _add_thought_card_with_text(plan: String):
 	var content_panel = PanelContainer.new()
 	content_panel.name = "ThoughtContent"
 	content_panel.visible = false
-	var cp_style = _sb(Color("#0a0a14"), 0)
+	var cp_style = HiruUtils.sb(Color("#0a0a14"), 0)
 	cp_style.content_margin_left = 14
 	cp_style.content_margin_right = 10
 	cp_style.content_margin_top = 2
@@ -2343,14 +2298,7 @@ func _add_thought_card_with_text(plan: String):
 	chat_container.add_child(wrapper)
 	
 	# ── Toggle Animation ──
-	chip.pressed.connect(func():
-		content_panel.visible = !content_panel.visible
-		if content_panel.visible:
-			chip.text = "  🧠 Thought for %s  ▾" % dur_str
-		else:
-			chip.text = "  🧠 Thought for %s  ▸" % dur_str
-		_scroll_bottom()
-	)
+	chip.pressed.connect(_on_thought_chip_pressed.bind(content_panel, chip, dur_str))
 	
 	# Animate entrance
 	wrapper.modulate.a = 0
@@ -2359,14 +2307,6 @@ func _add_thought_card_with_text(plan: String):
 	_scroll_bottom()
 
 
-func _format_duration(seconds: int) -> String:
-	"""Format seconds into a readable duration string."""
-	if seconds < 1:
-		return "<1s"
-	elif seconds >= 60:
-		return "%dm %ds" % [seconds / 60, seconds % 60]
-	else:
-		return "%ds" % seconds
 
 func _add_activity_bubble(text: String, color: Color):
 	"""Small minimalist chip in chat Area to show AI's current ACTION."""
@@ -2391,7 +2331,7 @@ func _add_activity_bubble(text: String, color: Color):
 func _add_file_card(path: String, operation: String, color: Color, diff_str: String = ""):
 	"""Cursor-style compact file chip."""
 	var chip = PanelContainer.new()
-	var style = _sb(C_PANEL, 6, true, color.darkened(0.5))
+	var style = HiruUtils.sb(HiruConst.C_PANEL, 6, true, color.darkened(0.5))
 	chip.add_theme_stylebox_override("panel", style)
 	
 	var hbox = HBoxContainer.new()
@@ -2418,7 +2358,7 @@ func _add_file_card(path: String, operation: String, color: Color, diff_str: Str
 	var btn = Button.new()
 	btn.flat = true
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.pressed.connect(func(): _open_file_in_editor(path))
+	btn.pressed.connect(_open_file_in_editor.bind(path))
 	
 	chip.add_child(hbox)
 	chip.add_child(btn)
@@ -2435,23 +2375,6 @@ func _update_project_list(path: String):
 		if not path in stats.text:
 			stats.text += "\n• " + path
 
-func _calculate_diff(old_text: String, new_text: String) -> String:
-	var old_lines = old_text.split("\n")
-	var new_lines = new_text.split("\n")
-	
-	var added = 0
-	var removed = 0
-	
-	if old_text == "":
-		return "+" + str(new_lines.size()) + " -0"
-		
-	added = maxi(0, new_lines.size() - old_lines.size())
-	removed = maxi(0, old_lines.size() - new_lines.size())
-	
-	if added == 0 and removed == 0 and old_text != new_text:
-		added = 1; removed = 1
-		
-	return "+" + str(added) + " -" + str(removed)
 
 func _open_file_in_editor(path: String):
 	if not Engine.is_editor_hint(): return
@@ -2459,9 +2382,9 @@ func _open_file_in_editor(path: String):
 	if res:
 		EditorInterface.select_file(path)
 		EditorInterface.edit_resource(res)
-		_set_status("📖 Opened " + path.get_file(), C_AI)
+		_set_status("📖 Opened " + path.get_file(), HiruConst.C_AI)
 	else:
-		_set_status("❌ Cannot find " + path.get_file(), C_ERR)
+		_set_status("❌ Cannot find " + path.get_file(), HiruConst.C_ERR)
 
 
 # ══════════════════ QUICK ACTIONS ══════════════════
@@ -2470,18 +2393,20 @@ func _on_generate():
 	_send("Generate a new GDScript for my project. Ask me what kind of script I need, then create and SAVE the complete script file.")
 
 func _on_fix():
-	# Read Godot log and send errors
+	# Read Godot log with Deep Analysis (Surgical Healing)
 	var Scanner = load("res://addons/hiruai/project_scanner.gd")
-	var log_text = Scanner.read_godot_log()
-	_send("""[DEBUGGING MISSION]
-Analyze the following Godot Log. 
-1. Identify the EXACT file and line number causing the error.
-2. Use [READ:] to inspect that file around the erroneous line.
-3. In your [THOUGHT:], explain WHY the error happened (Logic? Syntax? Missing node?) and how you will solve it definitively.
-4. Use [SAVE:] once you are 100% sure of the fix.
-
-GODOT LOG:
-%s""" % log_text)
+	var log_analysis = Scanner.read_godot_log(0) # Read last 8k for manual fix
+	
+	# Update offset so subsequent auto-checks are clean
+	_log_offset = Scanner.get_log_size()
+	
+	_add_msg("system", "🔍 **Surgical Healing Initiated** — Analyzing log for stack traces...")
+	_send("[DEBUGGING MISSION]\nAnalyze the following deep log analysis. \n" + \
+		"1. I've detected potential file targets and stack traces. PRIORITIZE these files.\n" + \
+		"2. Use [READ:] to inspect the exact line mentioned in the log.\n" + \
+		"3. In your [THOUGHT:], perform Root Cause Analysis. Fix the logic, not just the crash.\n" + \
+		"4. Use [SAVE:] once you are 100% sure.\n\n" + \
+		"DEEP LOG ANALYSIS:\n" + log_analysis)
 
 func _on_explain():
 	_send("Read all the scripts in my project and explain what each one does in detail.")
@@ -2511,24 +2436,57 @@ func _on_clear():
 # ══════════════════ SETTINGS ══════════════════
 
 func _show_settings():
+	if not _ensure_kimi(): return
 	var dialog = AcceptDialog.new()
 	dialog.title = "🤖 HiruAI Settings"
-	dialog.min_size = Vector2(450, 280)
+	dialog.min_size = Vector2(450, 360)
 
+	var Scroll = ScrollContainer.new()
+	Scroll.custom_minimum_size = Vector2(420, 320)
 	var vbox = VBoxContainer.new()
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", 12)
+	Scroll.add_child(vbox)
 
-	# API Key section
-	var key_label = Label.new()
-	key_label.text = "NVIDIA API Key:"
-	key_label.add_theme_font_size_override("font_size", 13)
-	vbox.add_child(key_label)
+	# Provider selection
+	var prov_label = Label.new()
+	prov_label.text = "AI Provider:"
+	prov_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(prov_label)
+	
+	var prov_opt = OptionButton.new()
+	var providers = kimi.get("PROVIDERS")
+	var cur_prov = kimi.get("current_provider")
+	var p_idx = 0
+	for p_name in providers:
+		prov_opt.add_item(p_name)
+		if p_name == cur_prov:
+			prov_opt.select(p_idx)
+		p_idx += 1
+	vbox.add_child(prov_opt)
 
-	var key_input = LineEdit.new()
-	key_input.placeholder_text = "nvapi-..."
-	key_input.secret = true
-	key_input.text = kimi.api_key
-	vbox.add_child(key_input)
+	# API Keys section
+	var n_key_label = Label.new()
+	n_key_label.text = "NVIDIA NIM API Key:"
+	n_key_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(n_key_label)
+
+	var n_key_input = LineEdit.new()
+	n_key_input.placeholder_text = "nvapi-..."
+	n_key_input.secret = true
+	n_key_input.text = kimi.get("nvidia_key")
+	vbox.add_child(n_key_input)
+
+	var p_key_label = Label.new()
+	p_key_label.text = "Puter.com API Key:"
+	p_key_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(p_key_label)
+
+	var p_key_input = LineEdit.new()
+	p_key_input.placeholder_text = "Enter Puter Key..."
+	p_key_input.secret = true
+	p_key_input.text = kimi.get("puter_key")
+	vbox.add_child(p_key_input)
 
 	# Model selection section
 	var model_label = Label.new()
@@ -2537,56 +2495,71 @@ func _show_settings():
 	vbox.add_child(model_label)
 
 	var model_opt = OptionButton.new()
-	var models_dict = kimi.MODELS
-	var idx = 0
-	var select_idx = 0
-	for m_name in models_dict:
-		model_opt.add_item(m_name)
-		if models_dict[m_name] == kimi.current_model:
-			select_idx = idx
-		idx += 1
-	
-	model_opt.add_separator()
-	model_opt.add_item("Custom Model...")
-	
-	if select_idx == 0 and kimi.current_model != models_dict.values()[0]:
-		model_opt.select(model_opt.get_item_count() - 1)
-	else:
-		model_opt.select(select_idx)
-	
 	vbox.add_child(model_opt)
 
 	var custom_model_input = LineEdit.new()
 	custom_model_input.placeholder_text = "provider/model-name"
-	custom_model_input.text = kimi.current_model
-	custom_model_input.visible = (model_opt.get_selected_id() == model_opt.get_item_count() - 1)
+	custom_model_input.text = kimi.get("current_model")
 	vbox.add_child(custom_model_input)
 
-	model_opt.item_selected.connect(func(id):
-		custom_model_input.visible = (id == model_opt.get_item_count() - 1)
-	)
+	# Dynamic Logic via method binds (Stable in Tool Mode)
+	prov_opt.item_selected.connect(_on_settings_provider_changed.bind(model_opt, prov_opt))
+	model_opt.item_selected.connect(_on_settings_model_changed.bind(model_opt, custom_model_input))
+	
+	# Initial populate
+	_on_settings_provider_changed(prov_opt.get_selected_id(), model_opt, prov_opt)
+	custom_model_input.visible = (model_opt.get_selected_id() == model_opt.get_item_count() - 1)
 
-	dialog.add_child(vbox)
+	dialog.add_child(Scroll)
 	add_child(dialog)
 
-	dialog.confirmed.connect(func():
-		var new_key = key_input.text.strip_edges()
-		var new_model = ""
-		if model_opt.get_selected_id() == model_opt.get_item_count() - 1:
-			new_model = custom_model_input.text.strip_edges()
-		else:
-			new_model = models_dict[model_opt.get_item_text(model_opt.get_selected_id())]
-		
-		if not new_key.is_empty():
-			kimi.save_settings(new_key, new_model)
-			_add_msg("system", "✅ Settings saved! Using model: " + new_model)
-			_set_status("● Ready (" + new_model.get_file() + ")", Color("#00ff88"))
-	)
+	# Confirmation via stable method
+	dialog.confirmed.connect(_on_settings_confirmed.bind(n_key_input, p_key_input, prov_opt, model_opt, custom_model_input))
 	dialog.popup_centered()
+
+func _on_settings_provider_changed(pid: int, model_opt: OptionButton, prov_opt: OptionButton):
+	var p_name = prov_opt.get_item_text(pid)
+	var provider_models = kimi.get("PROVIDER_MODELS")
+	var m_dict = provider_models.get(p_name, {})
+	
+	model_opt.clear()
+	var s_idx = 0
+	var k = 0
+	for m_name in m_dict:
+		model_opt.add_item(m_name)
+		if m_dict[m_name] == kimi.get("current_model"):
+			s_idx = k
+		k += 1
+	model_opt.add_separator()
+	model_opt.add_item("Custom Model...")
+	model_opt.select(s_idx)
+
+func _on_settings_model_changed(id: int, model_opt: OptionButton, custom_input: LineEdit):
+	custom_input.visible = (id == model_opt.get_item_count() - 1)
+
+func _on_settings_confirmed(n_input: LineEdit, p_input: LineEdit, prov_opt: OptionButton, model_opt: OptionButton, custom_input: LineEdit):
+	var n_key = n_input.text.strip_edges()
+	var p_key = p_input.text.strip_edges()
+	var new_prov = prov_opt.get_item_text(prov_opt.get_selected_id())
+	var provider_models = kimi.get("PROVIDER_MODELS")
+	var m_dict = provider_models.get(new_prov, {})
+	var new_model = ""
+	
+	if model_opt.get_selected_id() == model_opt.get_item_count() - 1:
+		new_model = custom_input.text.strip_edges()
+	else:
+		new_model = m_dict[model_opt.get_item_text(model_opt.get_selected_id())]
+	
+	kimi.call("save_settings", n_key, p_key, new_model, new_prov)
+	_add_msg("system", "✅ Settings saved! Provider: %s, Model: %s" % [new_prov, new_model])
+	_set_status("● Ready (" + new_model.get_file() + ")", Color("#00ff88"))
 
 
 func _on_play_main():
 	if Engine.is_editor_hint():
+		var Scanner = load("res://addons/hiruai/project_scanner.gd")
+		_log_offset = Scanner.get_log_size() # Bookmark log before run
+		
 		EditorInterface.play_main_scene()
 		_add_msg("system", "▶️ Running main project scene...")
 		_set_status("▶️ Playing", Color("#00ff88"))
@@ -2594,6 +2567,9 @@ func _on_play_main():
 
 func _on_play_current():
 	if Engine.is_editor_hint():
+		var Scanner = load("res://addons/hiruai/project_scanner.gd")
+		_log_offset = Scanner.get_log_size() # Bookmark log before run
+		
 		EditorInterface.play_current_scene()
 		_add_msg("system", "🎬 Running current editor scene...")
 		_set_status("🎬 Playing", Color("#42a5f5"))
@@ -2611,7 +2587,7 @@ func _on_self_healing_toggled(on: bool):
 	var btn = find_child("HealBtn", true, false)
 	if btn:
 		btn.text = "🔁 Self-Healing: ON" if on else "🔁 Self-Healing: OFF"
-		_style_btn(btn, Color("#00e676") if on else Color("#2d1b69"))
+		HiruUtils.style_btn(btn, Color("#00e676") if on else Color("#2d1b69"))
 	
 	if on:
 		_add_msg("system", "🔁 **Self-Healing Loop Active!**\nAI will now automatically run the game after you Accept changes and fix any errors it finds.")
@@ -2627,398 +2603,85 @@ func _process(_delta):
 
 func _auto_check_errors():
 	# Simple debounce/wait for logs to flush
-	await get_tree().create_timer(0.5).timeout
+	await get_tree().create_timer(0.6).timeout
 	var Scanner = load("res://addons/hiruai/project_scanner.gd")
-	var log_text = Scanner.read_godot_log()
+	var log_text = Scanner.read_godot_log(_log_offset) # ONLY read what happened after play/fix
 	
-	if "error" in log_text.to_lower() or "warning" in log_text.to_lower():
-		_add_msg("system", "⚠️ Errors detected in log! Sending to AI for autonomous fix...")
-		_send("[DEBUGGING MISSION]\nI just ran the game and found these errors in the log. \nPlease analyze and fix them automatically until the code works perfectly:\n\n" + log_text)
+	if "log:" in log_text.to_lower() or "📍" in log_text:
+		_add_msg("system", "⚠️ New errors detected! Sending to AI for autonomous fix...")
+		_send("[DEBUGGING MISSION]\nI just ran the game and found these NEW errors in the log. \nPlease analyze and fix them:\n\n" + log_text)
+		# Update offset for next cycle
+		_log_offset = Scanner.get_log_size()
 	else:
-		_add_msg("system", "✅ No critical errors found in logs after test run.")
-
-
-func _check_syntax_error(code: String) -> String:
-	"""Check if GDScript code has basic syntax errors."""
-	var script = GDScript.new()
-	script.source_code = code
-	var err = script.reload()
-	if err != OK:
-		# Map common error codes
-		match err:
-			ERR_PARSE_ERROR: return "Parse Error (Check for typos, missing colons, or invalid keywords)"
-			ERR_COMPILATION_FAILED: return "Compilation Failed (Indentation or syntax error)"
-			_: return "Syntax Error (Godot Error Code: %d)" % err
-	return ""
-
-
-func _find_missing_preloads(saves: Array[Dictionary]) -> Array[Dictionary]:
-	"""Scan code in saves for preload() of non-existent files to force AI to generate them."""
-	var missing: Array[Dictionary] = []
-	var all_save_paths: Array[String] = []
-	for s in saves:
-		all_save_paths.append(s["path"])
-	
-	var rx = RegEx.new()
-	rx.compile('preload\\s*\\(\\s*"([^"]+)"\\s*\\)')
-	
-	for s in saves:
-		var spath = s["path"]
-		for m in rx.search_all(s["content"]):
-			var dep_path: String = m.get_string(1)
-			# Normalize path
-			if not dep_path.begins_with("res://"):
-				dep_path = "res://" + dep_path.trim_prefix("/")
-			# Skip if file already exists on disk
-			if FileAccess.file_exists(dep_path):
-				continue
-			# Skip if already being saved in this batch
-			if dep_path in all_save_paths:
-				continue
-			
-			var already_added = false
-			for mis in missing:
-				if mis["source"] == spath and mis["missing"] == dep_path:
-					already_added = true
-			if not already_added:
-				missing.append({
-					"source": spath,
-					"missing": dep_path
-				})
-	return missing
+		_add_msg("system", "✅ No new critical errors found in logs.")
 
 
 
-func _extract_run_game(text: String) -> String:
-	"""Extract [RUN_GAME:type] tags."""
-	var rx = RegEx.new()
-	rx.compile("\\[RUN_GAME:(main|current)\\]")
-	var m = rx.search(text)
-	if m:
-		return m.get_string(1)
-	return ""
+
 
 
 # ══════════════════ SYSTEM PROMPT ══════════════════
 
 func _system_prompt() -> String:
-	return """You are **Hiru**, an elite AI coding agent for Godot 4.x (GDScript).
-You have DIRECT file-system access to the user's Godot project.
-You are NOT a chatbot — you are a professional coding agent like Cursor, Copilot, or Windsurf.
+	return """### IDENTITY
+You are **Hiru**, a Senior Autonomous Godot Architect (Elite Grade).
+You are designed to be perfectly obedient, highly analytical, and structurally superior.
 
-═══ YOUR IDENTITY ═══
-- Name: Hiru (Lead Godot Systems Architect & AI Agent)
-- Environment: Godot Engine 4.x (GDScript)
-- Role: You are a principal 10x developer. You do not just write scripts; you ENGINEER fully functional, interconnected systems. You build robust, scalable, and production-ready architectures.
-- Languages: English & Indonesian (Professional/Santai).
+═══ 🧠 ARCHITECTURAL BRAIN ═══
+1. **ROOT CAUSE ANALYSIS**: Before fixing an error, analyze WHY it happened.
+2. **DEPENDENCY VISION**: Consider how changes affect other nodes and scenes.
+3. **GODOT BEST PRACTICES**: Use Godot 4 features (Signals, %, Lambdas, Resources).
+4. **SKILL AWARENESS**: Use specialized skills from [SKILL_SYNC].
 
-═══ THE MASTERMIND PROTOCOL (STRICT) ═══
-You operate in a continuous cycle of Planning, Gathering Context, Execution, and Validation. For EVERY response:
+═══ 🚀 MISSION PROTOCOLS ═══
+- **[THOUGHT]** / `<thought>`: Start EVERY response with a deep logical breakdown.
+- **[READ:path]** / `<read:path>`: Inspect files.
+- **[READ_LINES:path:S-E]** / `<read_lines:path:S-E>`: Inspect specific lines.
+- **[SEARCH:key]** / `<search:key>`: Find references.
+- **[SAVE:path]** / `<save path="path">`: Create or overwrite files.
+- **[REPLACE:path:S-E]** / `<replace path="path" start="S" end="E">`: Targeted edits.
+- **[SCENE_SCAN:path]** / `<scene_scan:path>`: Analyze node hierarchy.
 
-1. **DEEP THOUGHT & STRATEGY [THOUGHT]** (MANDATORY):
-   - **[THOUGHT:] is REQUIRED.** You must ALWAYS start with a detailed technical breakdown.
-   - You must act as a Senior Architect. Instead of patching small holes, look at the big picture. How does this new feature interact with the existing system?
-   - Formulate a 100% complete step-by-step plan before writing any code. Check for edge cases, missing nodes, or potential null references.
-   - Example: `[THOUGHT: Building an inventory. Steps: 1. SEARCH for existing item definitions. 2. READ GameManager to understand global state. 3. SAVE a new Inventory.gd Autoload. 4. SAVE an InventoryUI.tscn (Control) to display it. 5. Modify Player to emit 'item_picked_up' signals. Risk: Must ensure InventoryUI is properly instanced.]`
+═══ 🛡️ STRICT QUALITY RULES ═══
+- **ZERO LEAKS**: NEVER output raw path markers or technical tags outside of the protocol tags.
+- **ZERO PLACEHOLDERS**: Provide COMPLETE, compilable code blocks. No "// ...".
+- **STATIC TYPING**: Use explicit types (`var x: int`, `func f() -> void`).
+- **CLEAN UI**: Ensure your textual message is helpful and free of technical clutter.
 
-2. **RESOURCES ACQUISITION [PRE-ACTION]** (MANDATORY BEFORE SAVING):
-   - **NO GUESSWORK.** If you don't confidently know the exact names of nodes, variables, or functions in a file, you MUST [READ:] or [SEARCH:] it first.
-   - Never assume the structure of `player.gd` or `main.tscn`. Scan them.
+═══ 🛠️ TOOLBOX (Dual Syntax Allowed) ═══
+[SAVE:res://...] OR <save path="res://...">
+[READ:res://...] OR <read:res://...>
+[REPLACE:res://...:10-20] OR <replace path="..." start="10" end="20">
 
-3. **SURGICAL EXECUTION [ACTION]**:
-   - Use `[SAVE:res://path.gd]` to update or create files.
-   - **CRITICAL - NO LAZY CODE**: You MUST output the ENTIRE file. Never use comments like `# ... rest of existing code ...` or `# ... implementation here ...`. If you leave out existing code, it WILL be deleted permanently.
-   - **SYSTEM COMPLETENESS**: If you make a new script that needs a UI, you MUST also output the `[SAVE:...]` block to create that `.tscn` file. Don't leave the user with half a feature.
-
-4. **FINAL VALIDATION [RESULT]**:
-   - Start with `[RESULT:]`.
-   - Provide a concise summary of systems built or fixed.
-   - **Crucial Editor Instructions**: Since you cannot click inside the Godot Editor, you MUST explicitly tell the user if they need to:
-     - Add a script to Autoload (Project Settings).
-     - Assign a specific Node Path in the inspector.
-     - Connect a signal manually via the Editor UI.
-
-═══ ERROR PREVENTION PROTOCOLS (STRICT) ═══
-- **MENTAL COMPILATION**: Before saving, verify: Unclosed brackets/parentheses, missing colons `if x:`, correct tab-based indentation, and matching `if/elif/else` blocks.
-- **CIRCULAR DEPENDENCY**: Never use `preload()` for scripts that depend on each other. Use `load()` strings instead.
-- **PRELOAD COMPLETENESS**: If you `preload("res://SomeFile.tscn")`, that file MUST exist. If it doesn't, you MUST generate its code using `[SAVE:res://SomeFile.tscn]` in the exact same response.
-- **DEFENSIVE PROGRAMMING**: 
-  - ALWAYS use `is_instance_valid(node)` or `if node != null:` before calling methods on dynamic nodes.
-  - Assume `get_node()` or `$` might fail. Use `@onready` and check for nulls.
-  - Check `if not signal.is_connected(callable):` before connecting via code.
-
-═══ GODOT 4.X MASTER ARCHITECTURE ═══
-- **STATIC TYPING**: Be strictly typed. (`var health: float = 100.0`, `func move(dir: Vector2) -> void:`). This stops bugs before they happen.
-- **DECOUPLING VIA SIGNALS**: Children should NEVER `get_parent()`. Children emit signals (`signal health_depleted`), parents connect and react.
-- **STATE MACHINES**: Use enums (`enum State {IDLE, WALK}`) and `match state:` statements for complex logic (Player/Enemy AI) instead of spaghetti `if/else`.
-- **UI RESPONSIVENESS**: Use Godot's built-in containers (`VBoxContainer`, `MarginContainer`, `GridContainer`). Do NOT manually set positions/sizes in code for UI elements.
-
-═══ AUTONOMOUS HARD RULES ═══
-- **PLAN FIRST, ACT SECOND**: [THOUGHT:] → [READ:]/[SEARCH:] → [SAVE:]. Skipping [THOUGHT:] is a CRITICAL violation.
-- **DEBUGGING IS SURGICAL**: If fixing an error, DO NOT just guess. Find the exact file and line number mentioned in the error. Use [READ:] to look at that line. Analyze why it crashed, then fix the root cause, not the symptom.
-- **PERSISTENT DEBUGGING**: If your fix fails twice, STOP. Your assumption is wrong. Use [SEARCH:] to find where the variable is actually defined or modified globally.
-- **NO CHATTY FILLER**: Minimize apologetic fluff ("I'm sorry", "My apologies"). You are a cold, precise engineering machine. Act like it.
-
-═══ COMMANDS REFERENCE ═══
-[SEARCH:keyword] — Global project search for definitions.
-[READ:res://...] — Read file (max 150 lines).
-[READ_LINES:res://...:start-end] — Precise line reading.
-[SAVE:res://...] — Write 100% full file content.
-[DELETE:res://...] — Erase file from disk.
+Begin your response with `[THOUGHT]` or `<thought>` to establish your Senior Architect status.
 """
 
 
-# ══════════════════ NEW FEATURES ══════════════════
-
-func _build_history_area():
-	var margin = MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 12)
-	margin.add_theme_constant_override("margin_top", 12)
-	margin.add_theme_constant_override("margin_right", 12)
-	margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	
-	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 8)
-	
-	var header = HBoxContainer.new()
-	header.add_theme_constant_override("separation", 8)
-	var title = Label.new()
-	title.text = "CONVERSATIONS"
-	title.add_theme_color_override("font_color", C_ACCENT)
-	title.add_theme_font_size_override("font_size", 11)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(title)
-	
-	var new_btn = Button.new()
-	new_btn.text = "+ New"
-	new_btn.flat = true
-	new_btn.add_theme_font_size_override("font_size", 10)
-	new_btn.add_theme_color_override("font_color", C_ACCENT_ALT)
-	new_btn.pressed.connect(_on_new_conversation)
-	new_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	header.add_child(new_btn)
-	vbox.add_child(header)
-	
-	var conv_scroll = ScrollContainer.new()
-	conv_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	
-	var conv_list = VBoxContainer.new()
-	conv_list.name = "ConversationList"
-	conv_list.add_theme_constant_override("separation", 4)
-	conv_scroll.add_child(conv_list)
-	vbox.add_child(conv_scroll)
-	
-	var hint = Label.new()
-	hint.text = "Conversations are saved when you clear or start new."
-	hint.add_theme_font_size_override("font_size", 9)
-	hint.add_theme_color_override("font_color", Color(C_TEXT_DIM, 0.5))
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vbox.add_child(hint)
-	
-	margin.add_child(vbox)
-	history_tab.add_child(margin)
-
-func _build_context_bar():
-	"""Context bar showing files currently in AI context."""
-	var bar = PanelContainer.new()
-	bar.name = "ContextBar"
-	var st = _sb(Color("#0a0a12"), 0)
-	st.content_margin_top = 3
-	st.content_margin_bottom = 3
-	st.content_margin_left = 8
-	bar.add_theme_stylebox_override("panel", st)
-	
-	var hbox = HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 6)
-	
-	var ctx_icon = Label.new()
-	ctx_icon.text = "📎"
-	ctx_icon.add_theme_font_size_override("font_size", 10)
-	hbox.add_child(ctx_icon)
-	
-	var ctx_label = Label.new()
-	ctx_label.name = "ContextLabel"
-	ctx_label.text = "No files in context"
-	ctx_label.add_theme_font_size_override("font_size", 9)
-	ctx_label.add_theme_color_override("font_color", C_TEXT_DIM)
-	ctx_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	ctx_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	hbox.add_child(ctx_label)
-	
-	bar.add_child(hbox)
-	add_child(bar)
-
-func _update_context_bar():
-	var bar = find_child("ContextBar", true, false)
-	if not bar: return
-	var lbl = bar.find_child("ContextLabel", true, false)
-	if not lbl: return
-	if _context_files.is_empty():
-		lbl.text = "No files in context"
-	else:
-		var names = []
-		for f in _context_files:
-			names.append(f.get_file())
-		lbl.text = ", ".join(names)
-
-func _update_token_display(tokens: int = 0):
-	_total_tokens += tokens
-	if _token_count_label:
-		if _total_tokens > 1000:
-			_token_count_label.text = "%.1fk" % (_total_tokens / 1000.0)
-		else:
-			_token_count_label.text = "%d tok" % _total_tokens
-
-func _show_quick_model_menu():
-	var popup = PopupMenu.new()
-	popup.name = "ModelPopup"
-	var models = kimi.MODELS
-	var idx = 0
-	for m_name in models:
-		popup.add_item(m_name, idx)
-		if models[m_name] == kimi.current_model:
-			popup.set_item_disabled(idx, true)
-			popup.set_item_text(idx, "✓ " + m_name)
-		idx += 1
-	popup.id_pressed.connect(func(id):
-		var keys = models.keys()
-		if id < keys.size():
-			var new_model = models[keys[id]]
-			kimi.current_model = new_model
-			kimi.save_settings(kimi.api_key, new_model)
-			if _model_quick_btn:
-				_model_quick_btn.text = " ⚡ " + new_model.get_file().left(12)
-			_add_msg("system", "✅ Model switched to: " + new_model.get_file())
-		popup.queue_free()
-	)
-	add_child(popup)
-	popup.popup(Rect2(get_global_mouse_position(), Vector2(200, 0)))
-
-func _show_slash_suggestions(text: String):
-	var commands = {
-		"/fix": "🔧 Auto-fix errors from Godot log",
-		"/explain": "💡 Explain project code",
-		"/generate": "📝 Generate new GDScript",
-		"/refactor": "♻️ Refactor and clean up code",
-		"/optimize": "⚡ Optimize performance",
-		"/test": "🧪 Generate unit tests",
-		"/scan": "📂 Scan project structure",
-		"/undo": "↩️ Undo last file edits",
-		"/clear": "🗑️ Clear chat history",
-	}
-	
-	var filtered = {}
-	for cmd in commands:
-		if cmd.begins_with(text.strip_edges().to_lower()) or text.strip_edges() == "/":
-			filtered[cmd] = commands[cmd]
-	
-	if filtered.is_empty():
-		if _cmd_popup and _cmd_popup.visible:
-			_cmd_popup.hide()
-		return
-	
-	_show_command_list(filtered)
-
-func _show_command_palette():
-	var commands = {
-		"/fix": "🔧 Auto-fix errors from Godot log",
-		"/explain": "💡 Explain project code",
-		"/generate": "📝 Generate new GDScript",
-		"/refactor": "♻️ Refactor and clean up code",
-		"/optimize": "⚡ Optimize performance",
-		"/test": "🧪 Generate unit tests",
-		"/scan": "📂 Scan project structure",
-		"/undo": "↩️ Undo last file edits",
-		"/clear": "🗑️ Clear chat history",
-	}
-	_show_command_list(commands)
-
-func _show_command_list(commands: Dictionary):
-	if _cmd_popup and is_instance_valid(_cmd_popup):
-		_cmd_popup.queue_free()
-	
-	_cmd_popup = PopupPanel.new()
-	_cmd_popup.name = "CmdPopup"
-	var popup_style = _sb(C_PANEL, 8, true, C_BORDER)
-	_cmd_popup.add_theme_stylebox_override("panel", popup_style)
-	
-	var vbox = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 2)
-	
-	var title = Label.new()
-	title.text = "Commands"
-	title.add_theme_font_size_override("font_size", 10)
-	title.add_theme_color_override("font_color", C_TEXT_DIM)
-	vbox.add_child(title)
-	
-	for cmd in commands:
-		var btn = Button.new()
-		btn.text = cmd + "  " + commands[cmd]
-		btn.flat = true
-		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		btn.add_theme_font_size_override("font_size", 11)
-		btn.add_theme_color_override("font_color", C_TEXT)
-		btn.add_theme_color_override("font_hover_color", C_ACCENT)
-		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		var cmd_bind = cmd
-		btn.pressed.connect(func():
-			input_field.text = cmd_bind + " "
-			input_field.set_caret_column(input_field.text.length())
-			_cmd_popup.hide()
-		)
-		vbox.add_child(btn)
-	
-	_cmd_popup.add_child(vbox)
-	add_child(_cmd_popup)
-	
-	var pos = input_field.get_global_rect().position
-	pos.y -= commands.size() * 24 + 40
-	_cmd_popup.popup(Rect2(pos, Vector2(280, 0)))
-
-func _handle_slash_command(text: String) -> bool:
-	var parts = text.split(" ", true, 2)
-	var cmd = parts[0].to_lower()
-	var args = parts[1] if parts.size() > 1 else ""
-	
-	match cmd:
-		"/fix":
-			_on_fix()
-			return true
-		"/explain":
-			_on_explain()
-			return true
-		"/generate":
-			if args != "":
-				_send("Generate a GDScript for: " + args + ". Create and SAVE the complete script file.")
-			else:
-				_on_generate()
-			return true
-		"/refactor":
-			if args != "":
-				_send("Refactor and clean up this code/file: " + args + ". Read the file first, then SAVE the improved version.")
-			else:
-				_send("Read all scripts in my project and suggest refactoring improvements. Focus on code quality, readability, and performance.")
-			return true
-		"/optimize":
-			_send("Analyze my project for performance issues. Read the scripts and suggest/apply optimizations. Focus on: signal usage, _process efficiency, memory management, node references.")
-			return true
-		"/test":
-			if args != "":
-				_send("Generate GDScript unit tests for: " + args + ". SAVE the test file to res://tests/.")
-			else:
-				_send("Generate unit tests for my main game scripts. SAVE them to res://tests/.")
-			return true
-		"/scan":
-			_on_scan()
-			return true
-		"/undo":
-			_on_undo()
-			return true
-		"/clear":
-			_on_clear()
-			return true
-		_:
-			return false
+func _sync_skills() -> String:
+	"""Dynamically discover AI skills and return their concatenated advice."""
+	var all_advice := ""
+	var path = "res://addons/hiruai/skills/"
+	var dir = DirAccess.open(path)
+	if dir:
+		dir.list_dir_begin()
+		var fname = dir.get_next()
+		while fname != "":
+			if not dir.current_is_dir() and fname.ends_with(".gd"):
+				var skill_script = load(path + fname)
+				if skill_script:
+					var skill_instance = Node.new()
+					skill_instance.set_script(skill_script)
+					var s_name = skill_instance.call("get_skill_name")
+					var s_advice = ""
+					if skill_instance.has_method("get_advice"):
+						s_advice = skill_instance.call("get_advice")
+					elif skill_instance.has_method("apply_reasoning"):
+						s_advice = skill_instance.call("apply_reasoning", "general task")
+					
+					all_advice += "\n--- SKILL: %s ---\n%s\n" % [s_name, s_advice]
+					skill_instance.free()
+			fname = dir.get_next()
+	return all_advice
 
 func _on_undo():
 	if _undo_stack.is_empty():
@@ -3035,13 +2698,13 @@ func _on_undo():
 		match type:
 			"save":
 				_write_project_file(path, old_content)
-				_add_activity("↩️", "Restored: " + path.get_file(), C_SAVE)
+				_add_activity("↩️", "Restored: " + path.get_file(), HiruConst.C_SAVE)
 			"create":
 				_delete_project_file(path)
-				_add_activity("↩️", "Deleted created file: " + path.get_file(), C_DELETE)
+				_add_activity("↩️", "Deleted created file: " + path.get_file(), HiruConst.C_DELETE)
 			"delete":
 				_write_project_file(path, old_content)
-				_add_activity("↩️", "Restored deleted file: " + path.get_file(), C_SAVE)
+				_add_activity("↩️", "Restored deleted file: " + path.get_file(), HiruConst.C_SAVE)
 	
 	var fs = EditorInterface.get_resource_filesystem() if Engine.is_editor_hint() else null
 	if fs: fs.scan()
@@ -3086,7 +2749,7 @@ func _refresh_history_list():
 	for i in range(_conversation_list.size() - 1, -1, -1):
 		var conv = _conversation_list[i]
 		var card = PanelContainer.new()
-		var st = _sb(C_PANEL, 6, true, C_BORDER)
+		var st = HiruUtils.sb(HiruConst.C_PANEL, 6, true, HiruConst.C_BORDER)
 		st.content_margin_top = 6
 		st.content_margin_bottom = 6
 		card.add_theme_stylebox_override("panel", st)
@@ -3110,17 +2773,16 @@ func _refresh_history_list():
 		var ts = Label.new()
 		ts.text = conv.get("timestamp", "")
 		ts.add_theme_font_size_override("font_size", 9)
-		ts.add_theme_color_override("font_color", C_TEXT_DIM)
+		ts.add_theme_color_override("font_color", HiruConst.C_TEXT_DIM)
 		text_vbox.add_child(ts)
 		hbox.add_child(text_vbox)
 		
 		var load_btn = Button.new()
 		load_btn.text = "↩"
 		load_btn.flat = true
-		load_btn.add_theme_color_override("font_color", C_ACCENT_ALT)
+		load_btn.add_theme_color_override("font_color", HiruConst.C_ACCENT_ALT)
 		load_btn.tooltip_text = "Load this conversation"
-		var idx_bind = i
-		load_btn.pressed.connect(func(): _load_conversation(idx_bind))
+		load_btn.pressed.connect(_load_conversation.bind(i))
 		load_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		hbox.add_child(load_btn)
 		
@@ -3144,8 +2806,41 @@ func _load_conversation(idx: int):
 		if msg["role"] == "user":
 			_add_msg("user", msg["content"].left(200))
 		elif msg["role"] == "assistant":
-			_add_msg("ai", _clean_display_text(msg["content"]))
+			_add_msg("ai", HiruUtils.clean_display_text(msg["content"]))
 	
 	tabs.current_tab = 0
 	_update_nav_active(0)
 	_add_msg("system", "📜 Loaded conversation: " + conv["title"])
+
+func _on_nav_btn_pressed(idx: int):
+	tabs.current_tab = idx
+	_update_nav_active(idx)
+
+func _on_command_suggestion_pressed(cmd: String):
+	if cmd.begins_with("/"):
+		input_field.text = cmd + " "
+		input_field.set_caret_column(input_field.text.length())
+		_cmd_popup.hide()
+	else:
+		_send(cmd)
+		_cmd_popup.hide()
+
+func _on_file_mention_pressed(path: String, query: String):
+	_attach_file_to_context(path)
+	var cur_text = input_field.text
+	var words = cur_text.split(" ")
+	for i in words.size():
+		if words[i].begins_with("@") and query in words[i].to_lower():
+			words.remove_at(i)
+			break
+	input_field.text = " ".join(words)
+	input_field.set_caret_column(input_field.text.length())
+	_file_suggestion_popup.hide()
+
+func _on_thought_chip_pressed(content_panel: Control, chip: Button, dur_str: String):
+	content_panel.visible = !content_panel.visible
+	if content_panel.visible:
+		chip.text = "  🧠 Thought for %s  ▾" % dur_str
+	else:
+		chip.text = "  🧠 Thought for %s  ▸" % dur_str
+	_scroll_bottom()

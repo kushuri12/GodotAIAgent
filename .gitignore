@@ -1,0 +1,9 @@
+# Godot-specific ignores
+.godot/
+*.tmp
+*.log
+*.meta
+
+# OS-specific ignores
+.DS_Store
+Thumbs.db

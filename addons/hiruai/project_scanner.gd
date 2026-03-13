@@ -1,5 +1,6 @@
 @tool
 extends RefCounted
+class_name HiruProjectScanner
 ## Project scanner with full file reading capability.
 ## Uses Godot's DirAccess/FileAccess — no Python needed.
 
@@ -39,7 +40,7 @@ static func get_full_context() -> String:
 			if content.length() <= MAX_AUTO_READ_SIZE and not content.begins_with("Error:"):
 				file_data.append({"path": f, "content": content, "size": content.length()})
 
-	file_data.sort_custom(func(a, b): return a["size"] < b["size"])
+	file_data.sort_custom(_sort_by_size)
 
 	var included := 0
 	for fd in file_data:
@@ -147,7 +148,7 @@ static func _tree_dir(path: String, lines: Array[String], prefix: String, depth:
 			entries.append({"name": fname, "is_dir": dir.current_is_dir()})
 		fname = dir.get_next()
 	dir.list_dir_end()
-	entries.sort_custom(func(a, b): return a["name"] < b["name"])
+	entries.sort_custom(_sort_by_name)
 	for i in entries.size():
 		var entry = entries[i]
 		var is_last = (i == entries.size() - 1)
@@ -210,29 +211,169 @@ static func search_text(query: String) -> String:
 	return "\n".join(results)
 
 
-static func read_godot_log() -> String:
-	"""Read the latest Godot editor log for error information."""
-	# Try multiple log locations
-	var log_paths := [
-		"user://logs/godot.log",
-		"user://logs/editor.log"
-	]
+static func get_log_size() -> int:
+	"""Returns the current size of the Godot log file."""
+	var log_paths := ["user://logs/godot.log", "user://logs/editor.log"]
+	for lp in log_paths:
+		if FileAccess.file_exists(lp):
+			var f = FileAccess.open(lp, FileAccess.READ)
+			if f:
+				var s = f.get_length()
+				f.close()
+				return s
+	return 0
+
+
+static func read_godot_log(since_offset: int = 0) -> String:
+	"""Read and parse the Godot log. If since_offset > 0, only reads NEW entries."""
+	var log_paths := ["user://logs/godot.log", "user://logs/editor.log"]
+	
+	var rx_stack := RegEx.new()
+	rx_stack.compile("((?:res://)?[a-zA-Z0-9_\\-\\./\\\\]+\\.(?:gd|tscn|tres)):(\\d+)")
+
 	for log_path in log_paths:
+		if not FileAccess.file_exists(log_path): continue
+		
 		var file = FileAccess.open(log_path, FileAccess.READ)
 		if file:
+			var total_size = file.get_length()
+			
+			if since_offset > 0 and since_offset < total_size:
+				file.seek(since_offset)
+			elif total_size > 8000:
+				file.seek(total_size - 8000)
+				
 			var content = file.get_as_text()
 			file.close()
-			# Get last 3000 chars (most recent logs)
-			if content.length() > 3000:
-				content = content.substr(content.length() - 3000)
-			# Filter for errors and warnings
+			
+			if content.strip_edges() == "":
+				return "No new entries found in log."
+			
 			var lines = content.split("\n")
-			var error_lines: Array[String] = []
-			for line in lines:
+			var error_context: Array[String] = []
+			var detected_targets: Array[String] = []
+			
+			# Scan for errors
+			for i in range(lines.size()):
+				var line = lines[i]
 				var lower = line.to_lower()
-				if "error" in lower or "warning" in lower or "script_error" in lower or "failed" in lower or "exception" in lower:
-					error_lines.append(line)
-			if error_lines.size() > 0:
-				return "Recent errors/warnings:\n" + "\n".join(error_lines.slice(-20))
-			return "No recent errors found in log."
-	return "Could not read Godot log file."
+				
+				if "error" in lower or "warning" in lower or "failed" in lower:
+					error_context.append("LOG: " + line)
+					
+					# Look for stack trace in nearby lines
+					for j in range(maxi(0, i-5), mini(lines.size(), i+5)):
+						var m = rx_stack.search(lines[j])
+						if m:
+							var target = m.get_string(1) + ":" + m.get_string(2)
+							if target not in detected_targets:
+								detected_targets.append(target)
+								error_context.append("📍 TARGET DETECTED: " + target)
+					
+					if error_context.size() > 40: break # Increased limit for better context
+					
+			if not error_context.is_empty():
+				var result = "=== LOG ANALYSIS (OFFSET: %d) ===\n" % since_offset + "\n".join(error_context)
+				if not detected_targets.is_empty():
+					result += "\n\n💡 I found specific code locations in the stack trace."
+				return result
+				
+			return "No critical errors found in the most recent log entries."
+	return "Could not access Godot log files."
+
+
+static func scan_scene(path: String) -> String:
+	"""Parses a .tscn file and returns a human-readable node tree."""
+	var file = FileAccess.open(path, FileAccess.READ)
+	if not file:
+		return "Error: Cannot read scene " + path
+		
+	var content = file.get_as_text()
+	file.close()
+	
+	var lines = content.split("\n")
+	var node_list: Array[Dictionary] = []
+	
+	# Regex to match [node name="..." type="..." parent="..."]
+	var rx_node = RegEx.new()
+	rx_node.compile('\\[node name="([^"]+)"(?: type="([^"]+)")?(?: parent="([^"]+)")?(?: instance=ExtResource\\("([^"]+)"\\))?')
+	
+	# Regex to match [ext_resource path="..." type="..." id="..."]
+	var rx_ext = RegEx.new()
+	rx_ext.compile('\\[ext_resource path="([^"]+)" type="([^"]+)" id="([^"]+)"\\]')
+	
+	var ext_resources = {}
+	
+	for line in lines:
+		var m_ext = rx_ext.search(line)
+		if m_ext:
+			ext_resources[m_ext.get_string(3)] = {
+				"path": m_ext.get_string(1),
+				"type": m_ext.get_string(2)
+			}
+			continue
+			
+		var m = rx_node.search(line)
+		if m:
+			var node_name = m.get_string(1)
+			var node_type = m.get_string(2)
+			var node_parent = m.get_string(3)
+			var instance_id = m.get_string(4)
+			
+			if node_type == "" and instance_id != "":
+				if ext_resources.has(instance_id):
+					node_type = "Instance:" + ext_resources[instance_id]["path"].get_file()
+				else:
+					node_type = "Inherited/Instanced"
+			
+			node_list.append({
+				"name": node_name,
+				"type": node_type if node_type != "" else "Node",
+				"parent": node_parent
+			})
+			
+	if node_list.is_empty():
+		return "No nodes found in scene (or format not recognized)."
+
+	# Build a hierarchy string
+	var result_lines: Array[String] = ["🎬 Scene Hierarchy: " + path]
+	
+	# Group by parent to help visualization
+	# The first node usually has no parent line in tscn or parent="."
+	for i in node_list.size():
+		var n = node_list[i]
+		var depth = 0
+		if n["parent"] != "":
+			if n["parent"] == ".":
+				depth = 1
+			else:
+				var parent_parts = n["parent"].split("/")
+				depth = parent_parts.size() + 1
+		
+		var indent = "  ".repeat(depth)
+		var prefix = "└── " if i == node_list.size() -1 else "├── "
+		result_lines.append(indent + prefix + n["name"] + " (" + n["type"] + ")")
+		
+	# --- Signals & Connections ---
+	var rx_conn = RegEx.new()
+	rx_conn.compile('\\[connection signal="([^"]+)" from="([^"]+)" to="([^"]+)" method="([^"]+)"\\]')
+	
+	var connections: Array[String] = []
+	for line in lines:
+		var m = rx_conn.search(line)
+		if m:
+			connections.append("  🔗 %s.%s -> %s.%s()" % [m.get_string(2), m.get_string(1), m.get_string(3), m.get_string(4)])
+	
+	if connections.size() > 0:
+		result_lines.append("\n📡 Signal Connections:")
+		result_lines.append_array(connections)
+		
+	return "\n".join(result_lines)
+
+
+static func _sort_by_size(a: Dictionary, b: Dictionary) -> bool:
+	return a["size"] < b["size"]
+
+
+static func _sort_by_name(a: Dictionary, b: Dictionary) -> bool:
+	return a["name"] < b["name"]

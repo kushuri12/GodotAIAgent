@@ -10,28 +10,44 @@ signal token_received(token: String) # NEW: fires per-token for streaming UI
 signal stream_started() # NEW: fires when first token arrives
 signal stream_finished(full_text: String) # NEW: fires when stream is done
 
-const API_URL := "https://integrate.api.nvidia.com/v1/chat/completions"
+const PROVIDERS = {
+	"NVIDIA": "https://integrate.api.nvidia.com/v1",
+	"Puter": "https://api.puter.com/puterai/openai/v1"
+}
 const CONFIG_PATH := "user://godot_ai_agent.cfg"
 
-# Common NVIDIA Models
-const MODELS = {
-	"Kimi K2 Instruct": "moonshotai/kimi-k2-instruct",
-	"Llama 3.1 405B": "meta/llama-3.1-405b-instruct",
-	"Llama 3.1 70B": "meta/llama-3.1-70b-instruct",
-	"Mistral Large 2": "mistralai/mistral-large-2-instruct",
-	"Nemotron 340B": "nvidia/nemotron-4-340b-instruct",
-	"Phi-3.5 MoE": "microsoft/phi-3.5-moe-instruct"
+const PROVIDER_MODELS = {
+	"NVIDIA": {
+		"GPT-OSS 120B (High)": "openai/gpt-oss-120b",
+		"Kimi K2 Instruct (Thinking)": "moonshotai/kimi-k2-instruct",
+		"Llama 3.1 405B (High)": "meta/llama-3.1-405b-instruct",
+		"Llama 3.1 70B": "meta/llama-3.1-70b-instruct",
+		"GLM-4.7 (High)": "z-ai/glm4.7",
+		"GLM-5 (High)": "z-ai/glm5",
+		"MiniMax m2.5": "minimaxai/minimax-m2.5"
+	},
+	"Puter": {
+		"Claude Opus 4.6 (High)": "claude-opus-4-6",
+		"Claude Sonnet 4.6": "claude-sonnet-4-6",
+		"Claude 3.5 Sonnet": "claude-3-5-sonnet-20241022",
+		"Gemini 3 Pro Preview (Thinking)": "gemini-3-pro-preview",
+		"GPT-4o (Thinking)": "gpt-4o",
+		"GPT-4o Mini": "gpt-4o-mini",
+	}
 }
 
-var api_key: String = ""
-var current_model: String = "moonshotai/kimi-k2-instruct"
+var nvidia_key: String = ""
+var puter_key: String = ""
+var api_key: String = "" # Current active key
+var current_model: String = "openai/gpt-oss-120b"
+var current_provider: String = "NVIDIA"
 var _http: HTTPRequest
 var _stream_http: HTTPClient # For SSE streaming
 var _is_busy := false
 var _is_streaming := false
 var _cancel_requested := false
 var _accumulated_text := ""
-var _stream_buffer := ""
+var _stream_byte_buffer := PackedByteArray()
 
 # Retry config
 const MAX_RETRIES := 2
@@ -51,17 +67,33 @@ func _ready():
 func load_config():
 	var cfg := ConfigFile.new()
 	if cfg.load(CONFIG_PATH) == OK:
-		api_key = cfg.get_value("api", "nvidia_key", "")
-		current_model = cfg.get_value("api", "model", "moonshotai/kimi-k2-instruct")
+		nvidia_key = cfg.get_value("api", "nvidia_key", "")
+		puter_key = cfg.get_value("api", "puter_key", "")
+		current_model = cfg.get_value("api", "model", "openai/gpt-oss-120b")
+		current_provider = cfg.get_value("api", "provider", "NVIDIA")
+		_update_active_key()
 
 
-func save_settings(key: String, model: String):
-	api_key = key
+func _update_active_key():
+	if current_provider == "NVIDIA":
+		api_key = nvidia_key
+	else:
+		api_key = puter_key
+
+
+func save_settings(n_key: String, p_key: String, model: String, provider: String = "NVIDIA"):
+	nvidia_key = n_key
+	puter_key = p_key
 	current_model = model
+	current_provider = provider
+	_update_active_key()
+	
 	var cfg := ConfigFile.new()
 	cfg.load(CONFIG_PATH)
-	cfg.set_value("api", "nvidia_key", key)
+	cfg.set_value("api", "nvidia_key", nvidia_key)
+	cfg.set_value("api", "puter_key", puter_key)
 	cfg.set_value("api", "model", model)
+	cfg.set_value("api", "provider", provider)
 	cfg.save(CONFIG_PATH)
 
 
@@ -103,7 +135,7 @@ func send_chat(messages: Array):
 func _send_streaming(messages: Array):
 	"""Use HTTPClient for SSE streaming."""
 	_is_streaming = true
-	_stream_buffer = ""
+	_stream_byte_buffer.clear()
 	_accumulated_text = ""
 
 	# Run streaming in a coroutine so we don't block
@@ -114,7 +146,12 @@ func _do_stream_request(messages: Array):
 	"""Perform the actual streaming HTTP request."""
 	_stream_http = HTTPClient.new()
 	
-	var err = _stream_http.connect_to_host("integrate.api.nvidia.com", 443, TLSOptions.client())
+	var base_url = PROVIDERS.get(current_provider, PROVIDERS["NVIDIA"])
+	var url_parts = base_url.replace("https://", "").split("/", false, 1)
+	var host = url_parts[0]
+	var path_prefix = "/" + url_parts[1] if url_parts.size() > 1 else ""
+	
+	var err = _stream_http.connect_to_host(host, 443, TLSOptions.client())
 	if err != OK:
 		_fallback_non_streaming(messages)
 		return
@@ -152,7 +189,7 @@ func _do_stream_request(messages: Array):
 		"stream": true
 	})
 
-	err = _stream_http.request(HTTPClient.METHOD_POST, "/v1/chat/completions", headers, body)
+	err = _stream_http.request(HTTPClient.METHOD_POST, path_prefix + "/chat/completions", headers, body)
 	if err != OK:
 		_fallback_non_streaming(messages)
 		return
@@ -219,8 +256,8 @@ func _do_stream_request(messages: Array):
 		_stream_http.poll()
 		var chunk = _stream_http.read_response_body_chunk()
 		if chunk.size() > 0:
-			_stream_buffer += chunk.get_string_from_utf8()
-			_process_sse_buffer()
+			_stream_byte_buffer.append_array(chunk)
+			_process_sse_byte_buffer()
 		else:
 			await get_tree().create_timer(0.02).timeout
 
@@ -228,6 +265,10 @@ func _do_stream_request(messages: Array):
 	_stream_http.close()
 	_is_streaming = false
 	_is_busy = false
+
+	# CRITICAL FIX: Process any remaining data in the buffer that didn't end with a newline
+	if _stream_byte_buffer.size() > 0:
+		_process_sse_byte_buffer(true) # Pass true to force process last line
 
 	if _accumulated_text.strip_edges().is_empty():
 		if _retry_count < MAX_RETRIES:
@@ -244,34 +285,64 @@ func _do_stream_request(messages: Array):
 	chat_completed.emit(_accumulated_text)
 
 
-func _process_sse_buffer():
-	"""Parse SSE data lines from the buffer."""
-	while "\n" in _stream_buffer:
-		var newline_pos = _stream_buffer.find("\n")
-		var line = _stream_buffer.substr(0, newline_pos).strip_edges()
-		_stream_buffer = _stream_buffer.substr(newline_pos + 1)
+func _process_sse_byte_buffer(force_last_line: bool = false):
+	"""Parse SSE data lines from the byte buffer (UTF-8 safe)."""
+	var text = _stream_byte_buffer.get_string_from_utf8()
+	
+	while "\n" in text or (force_last_line and text.strip_edges() != ""):
+		var newline_pos = text.find("\n")
+		var line = ""
+		var bytes_to_remove = 0
+		
+		if newline_pos != -1:
+			line = text.substr(0, newline_pos).strip_edges()
+			text = text.substr(newline_pos + 1)
+			# Find how many bytes that substring was
+			bytes_to_remove = line.to_utf8_buffer().size() + 1
+			# Special handling for \r\n
+			if newline_pos > 0 and text.length() > 0 and text[0] == "\n":
+				bytes_to_remove += 1
+		else:
+			# Forcing the last line
+			line = text.strip_edges()
+			bytes_to_remove = _stream_byte_buffer.size()
+			text = ""
 
-		if line == "":
-			continue
-		if line == "data: [DONE]":
-			continue
-		if not line.begins_with("data: "):
-			continue
+		# Safely update byte buffer
+		for k in range(mini(bytes_to_remove, _stream_byte_buffer.size())):
+			_stream_byte_buffer.remove_at(0)
 
-		var json_str = line.substr(6) # Remove "data: " prefix
+		if line == "" or line == "data: [DONE]" or not line.begins_with("data: "):
+			if not force_last_line: continue
+			else: break
+
+		var json_str = line.substr(6)
 		var json = JSON.new()
 		if json.parse(json_str) != OK:
 			continue
 
 		var data = json.data
-		if not data is Dictionary:
-			continue
-
-		if data.has("choices") and data["choices"] is Array and data["choices"].size() > 0:
+		if data is Dictionary and data.has("choices") and data["choices"].size() > 0:
 			var delta = data["choices"][0].get("delta", {})
-			if delta is Dictionary and delta.has("content"):
-				var content = delta["content"]
-				if content is String and content != "":
+			if delta is Dictionary:
+				var content = delta.get("content", "")
+				var reasoning = delta.get("reasoning_content", "")
+				if reasoning == "": reasoning = delta.get("thought", "")
+				
+				# 1. Handle explicit reasoning field (e.g. DeepSeek R1, Kimi K2)
+				if reasoning != "" and reasoning is String:
+					if not _accumulated_text.contains("[THOUGHT]"):
+						_accumulated_text += "[THOUGHT]\n"
+						token_received.emit("[THOUGHT]\n")
+					_accumulated_text += reasoning
+					token_received.emit(reasoning)
+				
+				# 2. Handle main content
+				if content != "" and content is String:
+					# If we started reasoning but haven't closed it, close it before content
+					if _accumulated_text.contains("[THOUGHT]") and not _accumulated_text.contains("[/THOUGHT]"):
+						_accumulated_text += "\n[/THOUGHT]\n"
+						token_received.emit("\n[/THOUGHT]\n")
 					_accumulated_text += content
 					token_received.emit(content)
 
@@ -294,7 +365,10 @@ func _fallback_non_streaming(messages: Array):
 		"stream": false
 	})
 
-	var request_err := _http.request(API_URL, headers, HTTPClient.METHOD_POST, body)
+	var base_url = PROVIDERS.get(current_provider, PROVIDERS["NVIDIA"])
+	var api_endpoint = base_url + "/chat/completions"
+
+	var request_err := _http.request(api_endpoint, headers, HTTPClient.METHOD_POST, body)
 	if request_err != OK:
 		_is_busy = false
 		chat_error.emit("Failed to connect. Error code: %d" % request_err)
@@ -342,10 +416,18 @@ func _on_request_completed(result: int, code: int, _headers: PackedStringArray, 
 		var choice: Dictionary = data["choices"][0]
 		var message: Dictionary = choice.get("message", {})
 		var content: String = message.get("content", "")
-		if content.is_empty():
+		var reasoning: String = message.get("reasoning_content", "")
+		if reasoning == "": reasoning = message.get("thought", "")
+		
+		var full_res = ""
+		if reasoning != "":
+			full_res += "[THOUGHT]\n" + reasoning + "\n[/THOUGHT]\n"
+		full_res += content
+		
+		if full_res.is_empty():
 			chat_error.emit("Empty response from AI.")
 		else:
-			chat_completed.emit(content)
+			chat_completed.emit(full_res)
 	else:
 		chat_error.emit("Unexpected response format from API.")
 
