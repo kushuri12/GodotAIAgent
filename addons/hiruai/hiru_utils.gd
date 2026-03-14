@@ -60,24 +60,25 @@ static func fmt(text: String) -> String:
 static func clean_display_text(text: String) -> String:
 	var result = text
 	
-	# Clear THOUGHTS
+	# Clear THOUGHTS (Smart cleaning for streaming)
+	# This hides thoughts even before the closing tag is received, without wiping the whole message
 	var thought_patterns = [
-		"(?is)\\[THOUGHT:?\\s*[\\s\\S]*?\\[/THOUGHT\\]",
-		"(?is)<thought>[\\s\\S]*?</thought>",
-		"(?is)\\[THOUGHT:?\\s*[\\s\\S]*",
-		"(?is)<thought>[\\s\\S]*"
+		"(?is)\\[THOUGHT:?\\s*[\\s\\S]*?(\\[/THOUGHT\\]|$)",
+		"(?is)<thought>[\\s\\S]*?(</thought>|$)",
+		"(?is)<think>[\\s\\S]*?(</think>|$)"
 	]
 	for p in thought_patterns:
 		var rx_t = RegEx.new()
 		rx_t.compile(p)
 		result = rx_t.sub(result, "", true)
 
-	result = result.replace("[THOUGHT]", "").replace("[/THOUGHT]", "").replace("<thought>", "").replace("</thought>", "")
+	# If only partial tags remain (e.g. at the start), clear them without wiping the whole rest of message
+	result = result.replace("[THOUGHT]", "").replace("[/THOUGHT]", "").replace("<thought>", "").replace("</thought>", "").replace("<think>", "").replace("</think>", "")
 
-	# Clear SAVE/REPLACE tags
+	# Clear SAVE/REPLACE tags (Smart cleaning for streaming/partial content)
 	var save_repro_patterns = [
-		"(?is)\\[(SAVE|REPLACE):[^\\]]*\\][\\s\\S]*?\\[(?:/SAVE|END_SAVE|/REPLACE)\\]",
-		"(?is)\\[(SAVE|REPLACE):[^\\]]*\\](?:\\s*```[\\s\\S]*?(?:```|$))?",
+		"(?is)\\[(SAVE|REPLACE):[^\\]]*\\][\\s\\S]*?(\\[(?:/SAVE|END_SAVE|/REPLACE)\\]|(?=\\[(SAVE|REPLACE|READ|SEARCH|THOUGHT))|$)",
+		"(?is)\\[(SAVE|REPLACE):[^\\]]*\\]\\s*```[\\s\\S]*?(```|$)"
 	]
 	for sp in save_repro_patterns:
 		var s_rx = RegEx.new()
@@ -86,13 +87,22 @@ static func clean_display_text(text: String) -> String:
 
 	# Clear other commmands
 	var tech_rx = RegEx.new()
-	tech_rx.compile("(?is)\\[(SAVE|REPLACE|READ|READ_LINES|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RESULT):[\\s\\S]*?(\\]|$)")
+	tech_rx.compile("(?is)\\[(SAVE|REPLACE|READ|READ_LINES|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RUN_CHECK|RESULT|SCAN_TREE):[\\s\\S]*?(\\]+|$)")
 	result = tech_rx.sub(result, "", true)
+	
+	result = result.replace("[SCAN_TREE]", "").replace("[RUN_CHECK]", "")
 
-	# Clear code blocks
-	var rx = RegEx.new()
-	rx.compile("```[\\s\\S]*?(```|$)")
-	result = rx.sub(result, "", true)
+	# Clear blocks like [PLAN] and [PROGRESS]
+	var block_patterns = [
+		"(?is)\\[PLAN\\][\\s\\S]*?\\[/PLAN\\]",
+		"(?is)\\[PROGRESS\\][\\s\\S]*?\\[/PROGRESS\\]"
+	]
+	for bp in block_patterns:
+		var brx = RegEx.new()
+		brx.compile(bp)
+		result = brx.sub(result, "", true)
+
+	result = result.replace("[PLAN]", "").replace("[/PLAN]", "").replace("[PROGRESS]", "").replace("[/PROGRESS]", "")
 
 	# Clean repetitive phrases
 	var robotic_phrases = [
@@ -120,21 +130,30 @@ static func clean_display_text(text: String) -> String:
 		xml_rx.compile("(?is)<" + tag + ":[^>]+>")
 		result = xml_rx.sub(result, "", true)
 
-	rx.compile("(?im)^\\s*(SAVE|REPLACE|READ|READ_LINES|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RESULT):.*$")
-	result = rx.sub(result, "", true)
+	var protocol_rx = RegEx.new()
+	protocol_rx.compile("(?im)^\\s*(SAVE|REPLACE|READ|READ_LINES|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RESULT):.*$")
+	result = protocol_rx.sub(result, "", true)
 	
 	var tag_rx = RegEx.new()
-	tag_rx.compile("(?i)\\[\\s*/?\\s*(SAVE|REPLACE|THOUGHT|READ|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RESULT|END_SAVE|READ_LINES)\\s*:?[\\s\\S]*?\\]")
+	tag_rx.compile("(?i)\\[\\s*/?\\s*(SAVE|REPLACE|THOUGHT|READ|SEARCH|DELETE|SCENE_SCAN|SKILL_SYNC|RUN_GAME|RESULT|END_SAVE|READ_LINES)\\s*:?[\\s\\S]*?\\]+")
 	result = tag_rx.sub(result, "", true)
 	
 	var placeholders = ["[/SAVE]", "[END_SAVE]", "[/REPLACE]", "[/THOUGHT]", "[/READ]", "<thought>", "</thought>"]
 	for p in placeholders:
 		result = result.replace(p, "")
 
-	while "\n\n\n" in result:
-		result = result.replace("\n\n\n", "\n\n")
+	# 5. Final pass for leading residue (commas, dots, formatting leftovers)
+	result = result.strip_edges()
+	var junk := true
+	while junk and result.length() > 0:
+		junk = false
+		for char in [".", ",", ";", ":", " ", "\n", "\r", "\t"]:
+			if result.begins_with(char):
+				result = result.substr(1).strip_edges()
+				junk = true
+				break
 
-	return result.strip_edges()
+	return result
 
 static func format_duration(seconds: int) -> String:
 	if seconds < 1: return "<1s"

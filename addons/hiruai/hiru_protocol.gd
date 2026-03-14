@@ -102,12 +102,14 @@ static func extract_scene_scans(text: String) -> Array[String]:
 
 static func extract_thoughts(text: String, allow_partial: bool = false) -> String:
 	var patterns = [
-		"(?is)\\[THOUGHT:?\\s*([\\s\\S]*?)\\[/THOUGHT\\]",
-		"(?is)<thought>([\\s\\S]*?)</thought>"
+		"(?is)\\[THOUGHT:?\\s*.*?\\]+([\\s\\S]*?)\\[/THOUGHT\\]",
+		"(?is)<thought>([\\s\\S]*?)</thought>",
+		"(?is)<think>([\\s\\S]*?)</think>"
 	]
 	if allow_partial:
-		patterns.append("(?is)\\[THOUGHT:?\\s*[^]]*\\]([\\s\\S]*)$")
+		patterns.append("(?is)\\[THOUGHT:?\\s*.*?\\]+([\\s\\S]*)$")
 		patterns.append("(?is)<thought>([\\s\\S]*)$")
+		patterns.append("(?is)<think>([\\s\\S]*)$")
 	for p in patterns:
 		var rx = RegEx.new()
 		rx.compile(p)
@@ -116,7 +118,10 @@ static func extract_thoughts(text: String, allow_partial: bool = false) -> Strin
 			return m.get_string(1).strip_edges()
 	if allow_partial and "[THOUGHT]" in text:
 		var start = text.find("[THOUGHT]") + 9
-		return text.substr(start).strip_edges()
+		var slice = text.substr(start).strip_edges()
+		# Clean up stray bracket that might stay from streaming or double tags
+		if slice.begins_with("]"): slice = slice.substr(1).strip_edges()
+		return slice
 	if allow_partial and "<thought>" in text:
 		var start = text.find("<thought>") + 9
 		return text.substr(start).strip_edges()
@@ -125,30 +130,33 @@ static func extract_thoughts(text: String, allow_partial: bool = false) -> Strin
 static func extract_saves(text: String) -> Array[Dictionary]:
 	var saves: Array[Dictionary] = []
 	var claimed_blocks: Array[String] = []
+	
+	# Priority 1: Strict Tags (Bracket or XML)
 	var save_patterns = [
 		"\\[SAVE:([^\\]]+)\\][\\s\\S]*?```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```",
+		"<save\\s*path=\"([^\"]+)\">\\s*```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```\\s*<\\/save>",
+		"<save\\s*path=\"([^\"]+)\">([\\s\\S]*?)<\\/save>",
 		"\\[SAVE:([^\\]]+)\\]([\\s\\S]*?)\\[(?:/SAVE|END_SAVE)\\]",
-		"<save\\s*path=\"([^\"]+)\">\\s*(?:```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```|([\\s\\S]*?))\\s*<\\/save>",
 		"<save:([^>]+)>\\s*```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```"
 	]
+	
 	for pattern in save_patterns:
-		var rx_strict = RegEx.new()
-		rx_strict.compile(pattern)
-		var matches = rx_strict.search_all(text)
-		for m in matches:
+		var rx = RegEx.new()
+		rx.compile(pattern)
+		for m in rx.search_all(text):
 			var path = m.get_string(1).strip_edges()
-			var raw_content = m.get_string(2)
-			if raw_content == "" and m.get_group_count() >= 3:
-				raw_content = m.get_string(3)
+			var content = m.get_string(2).strip_edges()
+			if content == "" and m.get_group_count() >= 3:
+				content = m.get_string(3).strip_edges()
 			
-			if raw_content == "": continue
-			
-			saves.append({
-				"path": path,
-				"content": clean_extraneous_gdscript(raw_content)
-			})
-			claimed_blocks.append(raw_content)
+			if content != "" and not _is_path_already_saved(saves, path):
+				saves.append({
+					"path": path,
+					"content": clean_extraneous_gdscript(content)
+				})
+				claimed_blocks.append(content)
 
+	# Priority 2: Annotated Code Blocks (e.g. res://path.gd followed by ```)
 	var rx_code = RegEx.new()
 	rx_code.compile("```(?:[a-zA-Z0-9_ \\t]*\\n)?([\\s\\S]*?)```")
 	var code_matches = rx_code.search_all(text)
@@ -159,12 +167,15 @@ static func extract_saves(text: String) -> Array[Dictionary]:
 			if raw_content.strip_edges() == cb.strip_edges():
 				is_claimed = true; break
 		if is_claimed: continue
+		
 		var start_pos = m_code.get_start()
 		var check_start = maxi(0, start_pos - 150)
 		var pre_text = text.substr(check_start, start_pos - check_start)
+		
 		var rx_path = RegEx.new()
 		rx_path.compile("(res://[a-zA-Z0-9_\\-\\./\\\\]+\\.[a-zA-Z0-9_]+)")
 		var path_matches = rx_path.search_all(pre_text)
+		
 		var found_path = ""
 		if path_matches.size() > 0:
 			found_path = path_matches[path_matches.size() - 1].get_string(1).strip_edges()
@@ -172,38 +183,60 @@ static func extract_saves(text: String) -> Array[Dictionary]:
 			var first_line = raw_content.split("\n")[0].strip_edges()
 			if first_line.begins_with("#") and "res://" in first_line:
 				var c_rx = RegEx.new()
-				c_rx.compile("(res://[a-zA-Z0-9_\\-\\./\\\\]+\\.[a-zA-Z0-9_]+)")
+				c_rx.compile("(res://[a-zA-Z0-9_\\-\\./\\\\]+\\.[a-zA-?A-Z0-9_]+)")
 				var cm = c_rx.search(first_line)
 				if cm: found_path = cm.get_string(1).strip_edges()
-		if found_path != "":
+		
+		if found_path != "" and not _is_path_already_saved(saves, found_path):
 			saves.append({
 				"path": found_path,
 				"content": clean_extraneous_gdscript(raw_content)
 			})
 			claimed_blocks.append(raw_content)
 
-	var rx_no_backticks = RegEx.new()
-	rx_no_backticks.compile("\\[SAVE:([^\\]]+)\\]")
-	var no_bt_matches = rx_no_backticks.search_all(text)
-	for i in no_bt_matches.size():
-		var path = no_bt_matches[i].get_string(1).strip_edges()
-		var already_has = false
-		for s in saves:
-			if s["path"] == path: already_has = true; break
-		if already_has: continue
-		var start_pos = no_bt_matches[i].get_end()
+	# Priority 3: Loose [SAVE:] without backticks (stops at next protocol tag)
+	var rx_loose = RegEx.new()
+	rx_loose.compile("\\[SAVE:([^\\]]+)\\]")
+	var loose_matches = rx_loose.search_all(text)
+	for i in loose_matches.size():
+		var path = loose_matches[i].get_string(1).strip_edges()
+		if _is_path_already_saved(saves, path): continue
+		
+		var start_pos = loose_matches[i].get_end()
 		var end_pos = text.length()
-		if i + 1 < no_bt_matches.size(): end_pos = no_bt_matches[i + 1].get_start()
-		var next_tag = text.find("[", start_pos)
-		if next_tag != -1 and not text.substr(next_tag, 6).begins_with("[node") and not text.substr(next_tag, 4).begins_with("[gd_"):
-			end_pos = mini(end_pos, next_tag)
+		
+		var terminator_tags = [
+			"[THOUGHT", "[PLAN", "[PROGRESS", "[SAVE:", "[READ:", "[READ_LINES:", 
+			"[SEARCH:", "[SCENE_SCAN:", "[DELETE:", "[RUN_GAME:", "[RUN_CHECK]", "[REPLACE:",
+			"[/SAVE]", "[END_SAVE]", "<thought", "<save", "<read", "<search", "<delete"
+		]
+		
+		if i + 1 < loose_matches.size(): 
+			end_pos = loose_matches[i + 1].get_start()
+		
+		var next_tag_pos = -1
+		for tag in terminator_tags:
+			var found = text.find(tag, start_pos)
+			if found != -1 and found < end_pos:
+				if next_tag_pos == -1 or found < next_tag_pos:
+					next_tag_pos = found
+		
+		if next_tag_pos != -1:
+			end_pos = next_tag_pos
+			
 		var block_content = text.substr(start_pos, end_pos - start_pos).strip_edges()
 		if block_content != "":
 			saves.append({
 				"path": path,
 				"content": clean_extraneous_gdscript(strip_code_boilerplate(block_content))
 			})
+			
 	return saves
+
+static func _is_path_already_saved(saves: Array[Dictionary], path: String) -> bool:
+	for s in saves:
+		if s["path"] == path: return true
+	return false
 
 static func clean_extraneous_gdscript(code: String) -> String:
 	var result = code.strip_edges()
@@ -252,3 +285,41 @@ static func extract_run_game(text: String) -> String:
 	var m = rx.search(text)
 	if m: return m.get_string(1)
 	return ""
+
+static func extract_run_check(text: String) -> bool:
+	return "[RUN_CHECK]" in text or "<run_check/>" in text or "<run_check>" in text
+
+static func extract_plan(text: String) -> String:
+	var rx = RegEx.new()
+	rx.compile("(?is)\\[PLAN\\]([\\s\\S]*?)\\[/PLAN\\]")
+	var m = rx.search(text)
+	if m: return m.get_string(1).strip_edges()
+	return ""
+
+static func extract_progress(text: String) -> String:
+	var rx = RegEx.new()
+	rx.compile("(?is)\\[PROGRESS\\]([\\s\\S]*?)\\[/PROGRESS\\]")
+	var m = rx.search(text)
+	if m: return m.get_string(1).strip_edges()
+	return ""
+
+static func extract_proactive_flags(text: String) -> Array[String]:
+	var results: Array[String] = []
+	var rx = RegEx.new()
+	rx.compile("(?i)(?:⚠️\\s*)?PROACTIVE FLAG:?\\s*(.*)")
+	for m in rx.search_all(text):
+		results.append(m.get_string(1).strip_edges())
+	return results
+static func extract_scan_tree(text: String) -> bool:
+	return "[SCAN_TREE]" in text or "<scan_tree/>" in text or "<scan_tree>" in text
+
+static func extract_diffs(text: String) -> Array[String]:
+	var paths: Array[String] = []
+	var rx = RegEx.new()
+	rx.compile("\\[DIFF:([^\\]]+)\\]|<diff:([^>]+)>")
+	for m in rx.search_all(text):
+		var p = m.get_string(1) if m.get_string(1) != "" else m.get_string(2)
+		p = p.strip_edges()
+		if p != "" and not p.begins_with("res://"): p = "res://" + p.trim_prefix("/")
+		if p != "" and p not in paths: paths.append(p)
+	return paths

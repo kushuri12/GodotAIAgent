@@ -12,7 +12,8 @@ signal stream_finished(full_text: String) # NEW: fires when stream is done
 
 const PROVIDERS = {
 	"NVIDIA": "https://integrate.api.nvidia.com/v1",
-	"Puter": "https://api.puter.com/puterai/openai/v1"
+	"Puter": "https://api.puter.com/puterai/openai/v1",
+	"Google": "https://generativelanguage.googleapis.com/v1beta/openai"
 }
 const CONFIG_PATH := "user://godot_ai_agent.cfg"
 
@@ -33,11 +34,15 @@ const PROVIDER_MODELS = {
 		"Gemini 3 Pro Preview (Thinking)": "gemini-3-pro-preview",
 		"GPT-4o (Thinking)": "gpt-4o",
 		"GPT-4o Mini": "gpt-4o-mini",
+	},
+	"Google": {
+		"Gemini 3.1 Flash Lite": "gemini-3.1-flash-lite-preview"
 	}
 }
 
 var nvidia_key: String = ""
 var puter_key: String = ""
+var google_key: String = ""
 var api_key: String = "" # Current active key
 var current_model: String = "openai/gpt-oss-120b"
 var current_provider: String = "NVIDIA"
@@ -69,6 +74,7 @@ func load_config():
 	if cfg.load(CONFIG_PATH) == OK:
 		nvidia_key = cfg.get_value("api", "nvidia_key", "")
 		puter_key = cfg.get_value("api", "puter_key", "")
+		google_key = cfg.get_value("api", "google_key", "")
 		current_model = cfg.get_value("api", "model", "openai/gpt-oss-120b")
 		current_provider = cfg.get_value("api", "provider", "NVIDIA")
 		_update_active_key()
@@ -77,13 +83,16 @@ func load_config():
 func _update_active_key():
 	if current_provider == "NVIDIA":
 		api_key = nvidia_key
+	elif current_provider == "Google":
+		api_key = google_key
 	else:
 		api_key = puter_key
 
 
-func save_settings(n_key: String, p_key: String, model: String, provider: String = "NVIDIA"):
+func save_settings(n_key: String, p_key: String, g_key: String, model: String, provider: String = "NVIDIA"):
 	nvidia_key = n_key
 	puter_key = p_key
+	google_key = g_key
 	current_model = model
 	current_provider = provider
 	_update_active_key()
@@ -92,6 +101,7 @@ func save_settings(n_key: String, p_key: String, model: String, provider: String
 	cfg.load(CONFIG_PATH)
 	cfg.set_value("api", "nvidia_key", nvidia_key)
 	cfg.set_value("api", "puter_key", puter_key)
+	cfg.set_value("api", "google_key", google_key)
 	cfg.set_value("api", "model", model)
 	cfg.set_value("api", "provider", provider)
 	cfg.save(CONFIG_PATH)
@@ -185,7 +195,7 @@ func _do_stream_request(messages: Array):
 		"model": current_model,
 		"messages": messages,
 		"temperature": 0.4,
-		"max_tokens": 4096,
+		"max_tokens": 8192,
 		"stream": true
 	})
 
@@ -243,9 +253,9 @@ func _do_stream_request(messages: Array):
 
 	# Stream is live! Emit start signal
 	stream_started.emit()
-	var first_token := true
 
 	# Read SSE stream
+	var last_chunk_time := Time.get_ticks_msec()
 	while _stream_http.get_status() == HTTPClient.STATUS_BODY:
 		if _cancel_requested:
 			_stream_http.close()
@@ -258,8 +268,13 @@ func _do_stream_request(messages: Array):
 		if chunk.size() > 0:
 			_stream_byte_buffer.append_array(chunk)
 			_process_sse_byte_buffer()
+			last_chunk_time = Time.get_ticks_msec()
 		else:
-			await get_tree().create_timer(0.02).timeout
+			# Idle check: if we are in BODY status but no data for 20 seconds, assume finished or stalled
+			if Time.get_ticks_msec() - last_chunk_time > 20000:
+				print("[HiruAI] Stream idle for 20s, concluding.")
+				break
+			await get_tree().create_timer(0.01).timeout
 
 	# Done streaming
 	_stream_http.close()
@@ -287,34 +302,38 @@ func _do_stream_request(messages: Array):
 
 func _process_sse_byte_buffer(force_last_line: bool = false):
 	"""Parse SSE data lines from the byte buffer (UTF-8 safe)."""
-	var text = _stream_byte_buffer.get_string_from_utf8()
-	
-	while "\n" in text or (force_last_line and text.strip_edges() != ""):
-		var newline_pos = text.find("\n")
-		var line = ""
-		var bytes_to_remove = 0
+	while true:
+		var newline_idx := -1
+		for i in range(_stream_byte_buffer.size()):
+			if _stream_byte_buffer[i] == 10: # '\n' character
+				newline_idx = i
+				break
+				
+		if newline_idx == -1:
+			if force_last_line and _stream_byte_buffer.size() > 0:
+				newline_idx = _stream_byte_buffer.size()
+			else:
+				break
+				
+		# Extract line up to newline (excluding newline)
+		var line_bytes := _stream_byte_buffer.slice(0, newline_idx)
 		
-		if newline_pos != -1:
-			line = text.substr(0, newline_pos).strip_edges()
-			text = text.substr(newline_pos + 1)
-			# Find how many bytes that substring was
-			bytes_to_remove = line.to_utf8_buffer().size() + 1
-			# Special handling for \r\n
-			if newline_pos > 0 and text.length() > 0 and text[0] == "\n":
-				bytes_to_remove += 1
-		else:
-			# Forcing the last line
-			line = text.strip_edges()
-			bytes_to_remove = _stream_byte_buffer.size()
-			text = ""
-
-		# Safely update byte buffer
-		for k in range(mini(bytes_to_remove, _stream_byte_buffer.size())):
-			_stream_byte_buffer.remove_at(0)
-
-		if line == "" or line == "data: [DONE]" or not line.begins_with("data: "):
-			if not force_last_line: continue
-			else: break
+		# Remove the processed bytes including newline from buffer
+		var remove_count = newline_idx
+		if _stream_byte_buffer.size() > newline_idx:
+			remove_count += 1
+			
+		# Efficiently remove bytes
+		if remove_count > 0:
+			_stream_byte_buffer = _stream_byte_buffer.slice(remove_count, _stream_byte_buffer.size())
+			
+		var line := line_bytes.get_string_from_utf8().strip_edges()
+		
+		if line == "" or line == "data: [DONE]":
+			continue
+			
+		if not line.begins_with("data: "):
+			continue
 
 		var json_str = line.substr(6)
 		var json = JSON.new()
@@ -361,7 +380,7 @@ func _fallback_non_streaming(messages: Array):
 		"model": current_model,
 		"messages": messages,
 		"temperature": 0.4,
-		"max_tokens": 4096,
+		"max_tokens": 8192,
 		"stream": false
 	})
 
